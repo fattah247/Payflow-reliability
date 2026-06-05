@@ -237,6 +237,28 @@ class PaymentFlowIntegrationTest {
         ))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("Refund requires manual review after reconciliation");
+        assertThat(openReviewReasons()).contains(ReviewReason.REFUND_BLOCKED_AFTER_RECONCILIATION);
+    }
+
+    @Test
+    void shouldReuseOpenReviewCaseForRepeatedOperationalMismatch() {
+        PaymentIntent intent = createStartedIntent("flow-key-009", "ORDER-1009", new BigDecimal("48000"));
+
+        ProviderWebhookRequest webhook = new ProviderWebhookRequest(
+                "evt-009",
+                "provider-tx-009",
+                intent.getId(),
+                ProviderStatus.SUCCESS,
+                new BigDecimal("47000"),
+                "IDR"
+        );
+
+        providerWebhookService.process(webhook, SIGNATURE);
+        providerWebhookService.process(webhook, SIGNATURE);
+
+        assertThat(reviewCaseRepository.findByStatusOrderByCreatedAtAsc(ReviewStatus.OPEN))
+                .filteredOn(review -> review.getReason() == ReviewReason.AMOUNT_MISMATCH)
+                .hasSize(1);
     }
 
     private PaymentIntent createStartedIntent(String idempotencyKey, String merchantReference, BigDecimal amount) {
