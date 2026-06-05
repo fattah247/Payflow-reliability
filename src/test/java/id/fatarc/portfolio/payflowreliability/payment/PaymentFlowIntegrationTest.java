@@ -186,7 +186,7 @@ class PaymentFlowIntegrationTest {
                         transaction.getProviderTransactionId(),
                         new BigDecimal("64000"),
                         "IDR",
-                        "SUCCESS",
+                        ProviderStatus.SUCCESS,
                         transaction.getSettledOn()
                 )
         )));
@@ -207,7 +207,7 @@ class PaymentFlowIntegrationTest {
                         transaction.getProviderTransactionId(),
                         new BigDecimal("87000"),
                         "IDR",
-                        "SUCCESS",
+                        ProviderStatus.SUCCESS,
                         LocalDate.now().minusDays(1)
                 )
         )));
@@ -226,7 +226,7 @@ class PaymentFlowIntegrationTest {
                         transaction.getProviderTransactionId(),
                         new BigDecimal("91000"),
                         "IDR",
-                        "SUCCESS",
+                        ProviderStatus.SUCCESS,
                         transaction.getSettledOn()
                 )
         )));

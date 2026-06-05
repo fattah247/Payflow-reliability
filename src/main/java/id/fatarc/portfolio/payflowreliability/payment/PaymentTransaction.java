@@ -71,6 +71,9 @@ public class PaymentTransaction {
     }
 
     public void markSettled(LocalDate settledOn) {
+        if (this.settled) {
+            throw new IllegalStateException("Payment transaction is already settled.");
+        }
         this.settled = true;
         this.settledOn = settledOn;
     }

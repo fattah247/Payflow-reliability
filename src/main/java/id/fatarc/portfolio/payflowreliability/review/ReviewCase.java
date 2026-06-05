@@ -59,6 +59,9 @@ public class ReviewCase {
     }
 
     public void resolve(String resolvedBy, String resolutionNote) {
+        if (status == ReviewStatus.RESOLVED) {
+            throw new IllegalStateException("Review case is already resolved.");
+        }
         this.status = ReviewStatus.RESOLVED;
         this.resolvedBy = resolvedBy;
         this.resolutionNote = resolutionNote;

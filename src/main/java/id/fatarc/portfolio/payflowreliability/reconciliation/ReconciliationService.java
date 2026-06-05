@@ -6,31 +6,34 @@ import id.fatarc.portfolio.payflowreliability.payment.PaymentIntentRepository;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentTransaction;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentTransactionRepository;
+import id.fatarc.portfolio.payflowreliability.payment.ProviderStatus;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportRequest;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportResponse;
-import id.fatarc.portfolio.payflowreliability.review.ReviewCase;
-import id.fatarc.portfolio.payflowreliability.review.ReviewCaseRepository;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
+import id.fatarc.portfolio.payflowreliability.review.ReviewService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
 @Service
 public class ReconciliationService {
+    private static final String RECONCILIATION_ACTOR = "reconciliation-job";
+
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final PaymentIntentRepository paymentIntentRepository;
-    private final ReviewCaseRepository reviewCaseRepository;
+    private final ReviewService reviewService;
     private final AuditService auditService;
 
     public ReconciliationService(PaymentTransactionRepository paymentTransactionRepository,
                                  PaymentIntentRepository paymentIntentRepository,
-                                 ReviewCaseRepository reviewCaseRepository,
+                                 ReviewService reviewService,
                                  AuditService auditService) {
         this.paymentTransactionRepository = paymentTransactionRepository;
         this.paymentIntentRepository = paymentIntentRepository;
-        this.reviewCaseRepository = reviewCaseRepository;
+        this.reviewService = reviewService;
         this.auditService = auditService;
     }
 
@@ -49,15 +52,15 @@ public class ReconciliationService {
                 continue;
             }
 
-            PaymentTransaction transaction = paymentTransactionRepository.findByProviderTransactionId(row.providerTransactionId())
-                    .orElse(null);
-
-            if (transaction == null) {
+            Optional<PaymentTransaction> transactionLookup = paymentTransactionRepository
+                    .findByProviderTransactionId(row.providerTransactionId());
+            if (transactionLookup.isEmpty()) {
                 mismatchCount++;
                 createReview(ReviewReason.PROVIDER_TRANSACTION_NOT_FOUND, "PROVIDER_TRANSACTION", row.providerTransactionId(),
                         "Provider report contains a transaction not found locally.");
                 continue;
             }
+            PaymentTransaction transaction = transactionLookup.orElseThrow();
 
             if (transaction.getAmount().compareTo(row.amount()) != 0) {
                 mismatchCount++;
@@ -73,7 +76,7 @@ public class ReconciliationService {
                         "Provider currency does not match local transaction currency.");
             }
 
-            if (!transaction.getProviderStatus().name().equals(row.providerStatus())) {
+            if (transaction.getProviderStatus() != row.providerStatus()) {
                 mismatchCount++;
                 rowMismatchCount++;
                 createReview(ReviewReason.STATUS_MISMATCH, "PROVIDER_TRANSACTION", row.providerTransactionId(),
@@ -87,19 +90,30 @@ public class ReconciliationService {
                         "Provider settlement date does not match local settlement date.");
             }
 
-            PaymentIntent intent = paymentIntentRepository.findById(transaction.getPaymentIntentId()).orElse(null);
-            if (intent != null && (intent.getState() == PaymentState.REFUND_REQUESTED || intent.getState() == PaymentState.REFUNDED)
-                    && "SUCCESS".equals(row.providerStatus())) {
+            Optional<PaymentIntent> intentLookup = paymentIntentRepository.findById(transaction.getPaymentIntentId());
+            if (intentLookup.isEmpty()) {
+                mismatchCount++;
+                rowMismatchCount++;
+                createReview(ReviewReason.PAYMENT_INTENT_NOT_FOUND, "PROVIDER_TRANSACTION", row.providerTransactionId(),
+                        "Local transaction points to a payment intent that does not exist.");
+                continue;
+            }
+
+            PaymentIntent intent = intentLookup.orElseThrow();
+            if (isRefundedIntentReportedAsSuccessful(intent, row.providerStatus())) {
                 mismatchCount++;
                 rowMismatchCount++;
                 createReview(ReviewReason.STATUS_MISMATCH, "PAYMENT_INTENT", intent.getId().toString(),
                         "Refunded payment still appears successful in the provider report.");
             }
 
-            if (rowMismatchCount == 0 && intent != null && intent.getState() == PaymentState.SETTLED) {
+            if (rowMismatchCount == 0) {
+                if (intent.getState() != PaymentState.SETTLED) {
+                    continue;
+                }
                 PaymentState previousState = intent.reconcile();
                 auditService.recordStateChange("PAYMENT_INTENT", intent.getId().toString(), previousState.name(),
-                        intent.getState().name(), "reconciliation-job",
+                        intent.getState().name(), RECONCILIATION_ACTOR,
                         "Settlement row matched the local transaction.",
                         "providerTransactionId=" + row.providerTransactionId());
             }
@@ -109,8 +123,13 @@ public class ReconciliationService {
     }
 
     private void createReview(ReviewReason reason, String referenceType, String referenceId, String details) {
-        reviewCaseRepository.save(new ReviewCase(reason, referenceType, referenceId, details, "reconciliation-job"));
+        reviewService.openCase(reason, referenceType, referenceId, details, RECONCILIATION_ACTOR);
         auditService.record(referenceType, referenceId, "RECONCILIATION_MISMATCH_FOUND",
-                "reconciliation-job", details, "reason=" + reason);
+                RECONCILIATION_ACTOR, details, "reason=" + reason);
+    }
+
+    private boolean isRefundedIntentReportedAsSuccessful(PaymentIntent intent, ProviderStatus providerStatus) {
+        return (intent.getState() == PaymentState.REFUND_REQUESTED || intent.getState() == PaymentState.REFUNDED)
+                && providerStatus == ProviderStatus.SUCCESS;
     }
 }

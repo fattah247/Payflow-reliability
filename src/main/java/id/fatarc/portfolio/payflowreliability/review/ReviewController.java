@@ -10,17 +10,15 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/review-cases")
 public class ReviewController {
-    private final ReviewCaseRepository reviewCaseRepository;
     private final ReviewService reviewService;
 
-    public ReviewController(ReviewCaseRepository reviewCaseRepository, ReviewService reviewService) {
-        this.reviewCaseRepository = reviewCaseRepository;
+    public ReviewController(ReviewService reviewService) {
         this.reviewService = reviewService;
     }
 
     @GetMapping
     public List<ReviewCase> listOpenCases() {
-        return reviewCaseRepository.findByStatusOrderByCreatedAtAsc(ReviewStatus.OPEN);
+        return reviewService.listOpenCases();
     }
 
     @PostMapping("/{reviewCaseId}/resolve")

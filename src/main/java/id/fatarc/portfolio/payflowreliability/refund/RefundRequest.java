@@ -42,6 +42,9 @@ public class RefundRequest {
     }
 
     public void complete() {
+        if (completed) {
+            throw new IllegalStateException("Refund request is already completed.");
+        }
         this.completed = true;
     }
 

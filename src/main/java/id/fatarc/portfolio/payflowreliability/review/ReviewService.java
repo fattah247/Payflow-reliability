@@ -6,6 +6,9 @@ import id.fatarc.portfolio.payflowreliability.review.dto.ResolveReviewCaseReques
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
+import java.util.UUID;
+
 @Service
 public class ReviewService {
     private final ReviewCaseRepository reviewCaseRepository;
@@ -16,12 +19,43 @@ public class ReviewService {
         this.auditService = auditService;
     }
 
+    @Transactional(readOnly = true)
+    public List<ReviewCase> listOpenCases() {
+        return reviewCaseRepository.findByStatusOrderByCreatedAtAsc(ReviewStatus.OPEN);
+    }
+
     @Transactional
-    public ReviewCase resolve(java.util.UUID reviewCaseId, ResolveReviewCaseRequest request) {
+    public ReviewCase openCase(ReviewReason reason,
+                               String referenceType,
+                               String referenceId,
+                               String details,
+                               String actor) {
+        return reviewCaseRepository
+                .findFirstByStatusAndReasonAndReferenceTypeAndReferenceIdOrderByCreatedAtAsc(
+                        ReviewStatus.OPEN,
+                        reason,
+                        referenceType,
+                        referenceId
+                )
+                .orElseGet(() -> reviewCaseRepository.save(new ReviewCase(
+                        reason,
+                        referenceType,
+                        referenceId,
+                        details,
+                        actor
+                )));
+    }
+
+    @Transactional
+    public ReviewCase resolve(UUID reviewCaseId, ResolveReviewCaseRequest request) {
         ReviewCase reviewCase = reviewCaseRepository.findById(reviewCaseId)
                 .orElseThrow(() -> new BusinessException("Review case not found: " + reviewCaseId));
 
-        reviewCase.resolve(request.actor(), request.note());
+        try {
+            reviewCase.resolve(request.actor(), request.note());
+        } catch (IllegalStateException ex) {
+            throw new BusinessException(ex.getMessage());
+        }
 
         auditService.record(
                 "MANUAL_REVIEW",
