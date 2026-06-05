@@ -87,6 +87,11 @@ public class SettlementService {
     }
 
     @Transactional(readOnly = true)
+    public List<SettlementBatch> listBatches() {
+        return settlementBatchRepository.findAll();
+    }
+
+    @Transactional(readOnly = true)
     public List<SettlementBatchItem> getItems(java.util.UUID batchId) {
         return settlementBatchItemRepository.findByBatchId(batchId);
     }

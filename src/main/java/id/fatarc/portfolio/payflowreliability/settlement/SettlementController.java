@@ -1,29 +1,30 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import jakarta.validation.constraints.NotBlank;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
 
+@Validated
 @RestController
 @RequestMapping("/api/settlements")
 public class SettlementController {
     private final SettlementService settlementService;
-    private final SettlementBatchRepository settlementBatchRepository;
 
-    public SettlementController(SettlementService settlementService, SettlementBatchRepository settlementBatchRepository) {
+    public SettlementController(SettlementService settlementService) {
         this.settlementService = settlementService;
-        this.settlementBatchRepository = settlementBatchRepository;
     }
 
     @PostMapping("/batches")
-    public SettlementBatch createBatch(@RequestParam String merchantId) {
+    public SettlementBatch createBatch(@RequestParam @NotBlank String merchantId) {
         return settlementService.createBatch(merchantId);
     }
 
     @GetMapping("/batches")
     public List<SettlementBatch> listBatches() {
-        return settlementBatchRepository.findAll();
+        return settlementService.listBatches();
     }
 
     @GetMapping("/batches/{batchId}/items")

@@ -1,9 +1,12 @@
 package id.fatarc.portfolio.payflowreliability.audit;
 
+import jakarta.validation.constraints.NotBlank;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
+@Validated
 @RestController
 @RequestMapping("/api/audit-events")
 public class AuditController {
@@ -14,7 +17,8 @@ public class AuditController {
     }
 
     @GetMapping
-    public List<AuditEvent> history(@RequestParam String aggregateType, @RequestParam String aggregateId) {
+    public List<AuditEvent> history(@RequestParam @NotBlank String aggregateType,
+                                    @RequestParam @NotBlank String aggregateId) {
         return auditService.history(aggregateType, aggregateId);
     }
 }

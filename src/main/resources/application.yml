@@ -2,9 +2,9 @@ spring:
   application:
     name: Payflow-reliability
   datasource:
-    url: jdbc:postgresql://localhost:5432/payflow_reliability
-    username: payflow_reliability
-    password: payflow_reliability
+    url: ${PAYFLOW_DB_URL:jdbc:postgresql://localhost:5432/payflow_reliability}
+    username: ${PAYFLOW_DB_USERNAME:payflow_reliability}
+    password: ${PAYFLOW_DB_PASSWORD:payflow_reliability}
   jpa:
     hibernate:
       ddl-auto: update
@@ -24,4 +24,4 @@ management:
 
 payment-lab:
   provider:
-    demo-signature: local-demo-signature
+    demo-signature: ${PAYFLOW_PROVIDER_SIGNATURE:local-demo-signature}
