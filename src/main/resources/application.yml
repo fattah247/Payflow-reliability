@@ -5,9 +5,12 @@ spring:
     url: ${PAYFLOW_DB_URL:jdbc:postgresql://localhost:5432/payflow_reliability}
     username: ${PAYFLOW_DB_USERNAME:payflow_reliability}
     password: ${PAYFLOW_DB_PASSWORD:payflow_reliability}
+  flyway:
+    # The schema lives in src/main/resources/db/migration; Hibernate only checks it matches the entities.
+    locations: classpath:db/migration
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     open-in-view: false
     properties:
       hibernate:
@@ -16,11 +19,20 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
+logging:
+  pattern:
+    # Every log line carries the request's correlation id (also returned as X-Request-Id and stored on audit events).
+    level: "%5p [requestId=%X{requestId:-}]"
+  level:
+    # Hibernate logs every constraint violation at ERROR, including expected, handled concurrency conflicts.
+    # GlobalExceptionHandler already logs those at WARN and anything unexpected at ERROR with a stack trace.
+    org.hibernate.engine.jdbc.spi.SqlExceptionHelper: "OFF"
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics
 
 payment-lab:
   provider:

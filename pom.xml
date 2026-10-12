@@ -15,7 +15,7 @@
     <artifactId>Payflow-reliability</artifactId>
     <version>0.1.0</version>
     <name>Payflow Reliability</name>
-    <description>NDA-safe payment reliability backend portfolio project</description>
+    <description>Local-first payment reliability backend: idempotency, webhooks, settlement, reconciliation, review</description>
 
     <properties>
         <java.version>21</java.version>
@@ -37,6 +37,14 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>

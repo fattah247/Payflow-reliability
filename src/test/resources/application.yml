@@ -1,11 +1,12 @@
 spring:
   datasource:
-    url: jdbc:h2:mem:payflow_reliability_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    # LOCK_TIMEOUT lets concurrency tests queue on row locks the way PostgreSQL does.
+    url: jdbc:h2:mem:payflow_reliability_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
     username: sa
     password:
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: validate
     open-in-view: false
 
 payment-lab:
