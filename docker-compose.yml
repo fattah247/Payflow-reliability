@@ -16,5 +16,18 @@ services:
       timeout: 5s
       retries: 10
 
+  # Optional: `docker compose up --build` runs the whole system without a local JDK.
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PAYFLOW_DB_URL: jdbc:postgresql://postgres:5432/payflow_reliability
+      PAYFLOW_DB_USERNAME: payflow_reliability
+      PAYFLOW_DB_PASSWORD: payflow_reliability
+    ports:
+      - "8080:8080"
+
 volumes:
   payflow_reliability_pgdata:
