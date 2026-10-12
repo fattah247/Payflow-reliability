@@ -7,4 +7,5 @@ import java.util.UUID;
 
 public interface AuditEventRepository extends JpaRepository<AuditEvent, UUID> {
     List<AuditEvent> findByAggregateTypeAndAggregateIdOrderByCreatedAtAsc(String aggregateType, String aggregateId);
+    List<AuditEvent> findByPaymentIntentIdOrderByCreatedAtAsc(UUID paymentIntentId);
 }

@@ -13,9 +13,30 @@ on:
 
 jobs:
   test:
+    name: test (${{ matrix.database }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # H2 keeps feedback fast; PostgreSQL proves migrations, schema validation,
+        # row locking and unique-violation handling on the real runtime database.
+        database: [h2, postgres]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: payflow_reliability
+          POSTGRES_USER: payflow_reliability
+          POSTGRES_PASSWORD: payflow_reliability
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payflow_reliability -d payflow_reliability"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,5 +46,11 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - name: Point tests at PostgreSQL
+        if: matrix.database == 'postgres'
+        run: |
+          echo "SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/payflow_reliability" >> "$GITHUB_ENV"
+          echo "SPRING_DATASOURCE_USERNAME=payflow_reliability" >> "$GITHUB_ENV"
+          echo "SPRING_DATASOURCE_PASSWORD=payflow_reliability" >> "$GITHUB_ENV"
       - name: Test
         run: ./mvnw test

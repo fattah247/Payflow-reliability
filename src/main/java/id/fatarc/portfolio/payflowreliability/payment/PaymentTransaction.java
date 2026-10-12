@@ -1,5 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
+import id.fatarc.portfolio.payflowreliability.common.InvalidStateTransitionException;
+import id.fatarc.portfolio.payflowreliability.common.Money;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
@@ -7,30 +9,25 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.UUID;
 
+/**
+ * The provider-side transaction behind a payment: one row per provider transaction id,
+ * whose status follows the provider's lifecycle (for example AUTHORIZED, then SUCCESS).
+ * Individual webhook deliveries are recorded separately as {@link ProviderEvent}s.
+ */
 @Entity
-@Table(
-        name = "payment_transactions",
-        indexes = {
-                @Index(name = "idx_payment_tx_event", columnList = "providerEventId"),
-                @Index(name = "idx_payment_tx_provider", columnList = "providerTransactionId"),
-                @Index(name = "idx_payment_tx_merchant", columnList = "merchantId")
-        },
-        uniqueConstraints = {
-                @UniqueConstraint(name = "uk_payment_tx_provider_event", columnNames = {"providerEventId"})
-        }
-)
+@Table(name = "payment_transactions")
 public class PaymentTransaction {
     @Id
     private UUID id;
+
+    @Version
+    private Long version;
 
     @Column(nullable = false)
     private UUID paymentIntentId;
 
     @Column(nullable = false)
     private String merchantId;
-
-    @Column(nullable = false)
-    private String providerEventId;
 
     @Column(nullable = false)
     private String providerTransactionId;
@@ -53,32 +50,43 @@ public class PaymentTransaction {
     @Column(nullable = false)
     private Instant createdAt;
 
+    @Column(nullable = false)
+    private Instant updatedAt;
+
     protected PaymentTransaction() {
     }
 
-    public PaymentTransaction(UUID paymentIntentId, String merchantId, String providerEventId, String providerTransactionId,
+    public PaymentTransaction(UUID paymentIntentId, String merchantId, String providerTransactionId,
                               ProviderStatus providerStatus, BigDecimal amount, String currency) {
         this.id = UUID.randomUUID();
         this.paymentIntentId = paymentIntentId;
         this.merchantId = merchantId;
-        this.providerEventId = providerEventId;
         this.providerTransactionId = providerTransactionId;
         this.providerStatus = providerStatus;
-        this.amount = amount;
+        this.amount = Money.normalize(amount);
         this.currency = currency;
         this.settled = false;
         this.createdAt = Instant.now();
+        this.updatedAt = this.createdAt;
+    }
+
+    public void recordProviderStatus(ProviderStatus providerStatus) {
+        this.providerStatus = providerStatus;
+        this.updatedAt = Instant.now();
     }
 
     public void markSettled(LocalDate settledOn) {
+        if (this.settled) {
+            throw new InvalidStateTransitionException("Payment transaction " + providerTransactionId + " is already settled.");
+        }
         this.settled = true;
         this.settledOn = settledOn;
+        this.updatedAt = Instant.now();
     }
 
     public UUID getId() { return id; }
     public UUID getPaymentIntentId() { return paymentIntentId; }
     public String getMerchantId() { return merchantId; }
-    public String getProviderEventId() { return providerEventId; }
     public String getProviderTransactionId() { return providerTransactionId; }
     public ProviderStatus getProviderStatus() { return providerStatus; }
     public BigDecimal getAmount() { return amount; }
@@ -86,4 +94,5 @@ public class PaymentTransaction {
     public boolean isSettled() { return settled; }
     public LocalDate getSettledOn() { return settledOn; }
     public Instant getCreatedAt() { return createdAt; }
+    public Instant getUpdatedAt() { return updatedAt; }
 }

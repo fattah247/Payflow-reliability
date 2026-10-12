@@ -7,6 +7,9 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
+/**
+ * @param stateBeforeReview set only while the payment is in MANUAL_REVIEW: where releasing it would return to
+ */
 public record PaymentIntentResponse(
         UUID id,
         String merchantId,
@@ -14,6 +17,7 @@ public record PaymentIntentResponse(
         BigDecimal amount,
         String currency,
         PaymentState state,
+        PaymentState stateBeforeReview,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -25,6 +29,7 @@ public record PaymentIntentResponse(
                 intent.getAmount(),
                 intent.getCurrency(),
                 intent.getState(),
+                intent.getStateBeforeReview(),
                 intent.getCreatedAt(),
                 intent.getUpdatedAt()
         );

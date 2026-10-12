@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import id.fatarc.portfolio.payflowreliability.common.Money;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
@@ -7,10 +8,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "settlement_batches", indexes = {
-        @Index(name = "idx_settlement_merchant", columnList = "merchantId"),
-        @Index(name = "idx_settlement_created", columnList = "createdAt")
-})
+@Table(name = "settlement_batches")
 public class SettlementBatch {
     @Id
     private UUID id;
@@ -37,7 +35,7 @@ public class SettlementBatch {
         this.id = UUID.randomUUID();
         this.merchantId = merchantId;
         this.transactionCount = transactionCount;
-        this.totalAmount = totalAmount;
+        this.totalAmount = Money.normalize(totalAmount);
         this.currency = currency;
         this.createdAt = Instant.now();
     }

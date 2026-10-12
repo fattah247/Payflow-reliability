@@ -1,112 +1,48 @@
+# Architecture Flow
+
+End-to-end lifecycle of a payment, from creation to reconciliation and refund, including where humans decide. The webhook decision order is in the [README](../README.md#webhook-decision-flow).
+
+```mermaid
 flowchart TD
-A[Merchant / API Client] --> B[POST /api/payment-intents]
-B --> C[PaymentIntentController]
-C --> D[PaymentIntentService]
+    A[Merchant API client] --> B[POST /api/payment-intents<br/>Idempotency-Key]
+    B --> C{Key seen for this merchant?}
+    C -- No --> C1[Insert intent CREATED<br/>201 Created]
+    C -- Yes, same payload --> C2[Replay existing intent<br/>200 Idempotent-Replayed]
+    C -- Yes, different payload --> C3[422 IDEMPOTENCY_KEY_REUSED]
+    C1 -. concurrent loser hits unique key .-> C2
 
-    D --> E{Idempotency-Key valid?}
-    E -- No / blank --> E1[Reject request<br/>BusinessException]
-    E -- Yes --> F{Existing intent<br/>with same key?}
+    C1 --> D[POST /start<br/>CREATED to PENDING]
+    C2 --> D
 
-    F -- Yes --> G{Payload matches<br/>original request?}
-    G -- Yes --> H[Return existing PaymentIntent<br/>Record IDEMPOTENCY_REPLAYED audit]
-    G -- No --> G1[Reject reused key<br/>different payload]
+    D --> E[Provider webhooks<br/>row lock on payment]
+    E --> E1[APPLIED<br/>PENDING to AUTHORIZED to SUCCESS<br/>one provider tx row, status updated]
+    E --> E2[DUPLICATE_IGNORED / STALE_IGNORED<br/>audited, no review]
+    E --> E3[SENT_TO_REVIEW<br/>mismatch or contradiction holds an in-flight payment]
+    E --> E4[DEFERRED 409<br/>payment on hold, provider redelivers]
 
-    F -- No --> I[Create PaymentIntent<br/>state = CREATED]
-    I --> J[Record PAYMENT_INTENT_CREATED audit]
+    E3 --> R[Review queue<br/>allowedActions per case]
+    R -- RELEASE_PAYMENT --> E
+    R -- FAIL_PAYMENT --> X1[FAILED]
+    R -- REQUIRE_REVERSAL --> X2[REVERSAL_REQUIRED]
 
-    J --> K[POST /api/payment-intents/{id}/start]
-    H --> K
-    K --> L[PaymentIntent.start]
-    L --> M[State: CREATED -> PENDING]
-    M --> N[Record TRANSACTION_STATE_CHANGED audit]
+    E1 --> S[POST /api/settlements/batches<br/>locks payments in id order<br/>only payments still SUCCESS<br/>one currency per batch]
+    S --> S1[SETTLED<br/>one batch item per transaction, enforced by DB]
 
-    N --> O[POST /fake-provider/webhook]
-    O --> P[ProviderWebhookController]
-    P --> Q[ProviderWebhookService]
+    S1 --> Q[POST /api/reconciliation/reports<br/>verdict per row]
+    Q -- clean match --> Q1[RECONCILED]
+    Q -- mismatch --> R
+    Q -- re-import --> Q2[ALREADY_RECONCILED]
 
-    Q --> R{Valid provider signature?}
-    R -- No --> R1[Create ReviewCase<br/>INVALID_WEBHOOK_SIGNATURE]
-    R1 --> R2[Record rejected webhook audit]
-    R2 --> R3[Reject webhook]
+    E1 --> F[POST /api/refunds<br/>full amount, one live refund]
+    S1 --> F
+    Q1 --> F
+    F -- SUCCESS or SETTLED --> F1[REFUND_REQUESTED]
+    F -- RECONCILED --> F2[Refund PENDING_REVIEW<br/>202 Accepted]
+    F2 --> R
+    R -- APPROVE_REFUND --> F1
+    R -- REJECT_REFUND --> F3[Refund REJECTED<br/>payment stays RECONCILED]
+    F1 --> F4[POST /refunds/id/complete<br/>REFUNDED]
 
-    R -- Yes --> S[Record WEBHOOK_RECEIVED audit]
-    S --> T{PaymentIntent exists?}
-    T -- No --> T1[Create ReviewCase<br/>PAYMENT_INTENT_NOT_FOUND]
-    T1 --> T2[Reject webhook]
-
-    T -- Yes --> U{Duplicate providerEventId?}
-    U -- Yes --> U1[Create ReviewCase<br/>DUPLICATE_PROVIDER_EVENT]
-    U1 --> U2[Record DUPLICATE_WEBHOOK_IGNORED audit]
-    U2 --> U3[Return existing intent]
-
-    U -- No --> V{Duplicate providerTransactionId?}
-    V -- Yes --> V1[Create ReviewCase<br/>DUPLICATE_PROVIDER_EVENT]
-    V1 --> V2[Record DUPLICATE_TRANSACTION_IGNORED audit]
-    V2 --> V3[Return existing intent]
-
-    V -- No --> W{Amount/currency matches<br/>local intent?}
-    W -- No --> W1[Move PaymentIntent to MANUAL_REVIEW]
-    W1 --> W2[Create ReviewCase<br/>AMOUNT_MISMATCH]
-    W2 --> W3[Record state-change audit]
-    W3 --> W4[Return intent]
-
-    W -- Yes --> X{Webhook status}
-    X --> X1[AUTHORIZED]
-    X --> X2[SUCCESS]
-    X --> X3[FAILED]
-    X --> X4[EXPIRED]
-    X --> X5[REVERSAL_REQUIRED]
-
-    X1 --> Y[Apply guarded state transition]
-    X2 --> Y
-    X3 --> Y
-    X4 --> Y
-    X5 --> Y
-
-    Y --> Z{Transition valid?}
-    Z -- No --> Z1[Create ReviewCase<br/>INVALID_STATE_TRANSITION]
-    Z1 --> Z2[Record WEBHOOK_IGNORED audit]
-    Z2 --> Z3[Return intent]
-
-    Z -- Yes --> AA[Save PaymentTransaction]
-    AA --> AB[Record PROVIDER_WEBHOOK_PROCESSED audit]
-
-    AB --> AC[POST /api/settlements/batches]
-    AC --> AD[SettlementService]
-    AD --> AE[Find successful unsettled transactions]
-    AE --> AF{Any pending<br/>successful tx?}
-    AF -- No --> AF1[Reject: no unsettled successful transactions]
-    AF -- Yes --> AG{Mixed currency?}
-    AG -- Yes --> AG1[Reject: mixed currency not supported]
-    AG -- No --> AH[Create SettlementBatch]
-    AH --> AI[Create SettlementBatchItem]
-    AI --> AJ[Mark PaymentTransaction settled]
-    AJ --> AK[PaymentIntent.settle]
-    AK --> AL[State: SUCCESS -> SETTLED]
-    AL --> AM[Record settlement audit]
-
-    AM --> AN[POST /api/reconciliation/reports]
-    AN --> AO[ReconciliationService]
-    AO --> AP[Compare provider report rows<br/>against local transactions]
-
-    AP --> AQ{Mismatch found?}
-    AQ -- Yes --> AR[Create ReviewCase<br/>amount/currency/status/date/not-found/duplicate]
-    AR --> AS[Record RECONCILIATION_MISMATCH_FOUND audit]
-
-    AQ -- No --> AT{Intent is SETTLED?}
-    AT -- Yes --> AU[PaymentIntent.reconcile]
-    AU --> AV[State: SETTLED -> RECONCILED]
-    AV --> AW[Record reconciliation audit]
-    AT -- No --> AX[No state change]
-
-    AW --> AY[GET /api/audit-events]
-    AS --> AY
-    AY --> AZ[Audit trail visible by aggregateType + aggregateId]
-
-    AW --> BA[Optional refund flow]
-    BA --> BB[POST /api/refunds/payment-intents/{id}]
-    BB --> BC{Payment already RECONCILED?}
-    BC -- Yes --> BD[Block refund<br/>manual review required]
-    BC -- No --> BE[State: SUCCESS/SETTLED -> REFUND_REQUESTED]
-    BE --> BF[POST /api/refunds/{refundId}/complete]
-    BF --> BG[State: REFUND_REQUESTED -> REFUNDED]
+    E1 & E2 & E3 & S1 & Q1 & F1 & F4 & R --> AU[Audit events<br/>payment id + request id]
+    AU --> CF[GET /api/payment-intents/id/case-file<br/>GET /api/operations/summary]
+```
