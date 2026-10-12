@@ -38,3 +38,16 @@ Every run uses fresh ids, so the demo can be repeated without resetting the data
 ./scripts/demo-readable.sh   # narrated
 ./scripts/demo.sh            # short
 ```
+
+## Single scenarios
+
+`./scripts/scenarios.sh <name>` runs one behavior in depth and checks it, printing PASS or FAIL per expectation (non-zero exit on failure). The README screenshots are this output.
+
+| Scenario | Shows |
+|---|---|
+| `idempotency` | replay, payload mismatch, 8 parallel retries |
+| `duplicate-webhook` | redelivery, restated status, late authorization, 10 parallel deliveries |
+| `amount-mismatch` | hold, deferred redelivery, required decision, release, recovery |
+| `settlement` | 4 racing runs, a payment skipped after a refund request |
+| `reconciliation` | per-row verdicts, safe re-import |
+| `audit-trail` | case file timeline with actors and request ids |

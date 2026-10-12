@@ -246,7 +246,62 @@ With the app running:
 
 A narrated walkthrough: idempotent creation, authorization then capture, absorbed provider noise, an amount mismatch that is held, deferred, released and recovered, settlement, reconciliation verdicts, an approval-gated refund, a case file, and the operations summary.
 
-`./scripts/demo.sh` is the short version. Both scripts use fresh ids on every run, so they can be repeated without resetting the database.
+`./scripts/demo.sh` is the short version. To look at one behavior in depth, with its outcome checked:
+
+```bash
+./scripts/scenarios.sh idempotency          # also: duplicate-webhook, amount-mismatch, settlement, reconciliation, audit-trail
+```
+
+Each scenario prints what happened and a PASS/FAIL line per expectation, and exits non-zero if any check fails. All scripts use fresh ids on every run, so they can be repeated without resetting the database.
+
+---
+
+## Screenshots
+
+Each screenshot shows the unedited output of the command in its first line, run against the app on PostgreSQL 16 (the test screenshot runs the suite on H2 and on PostgreSQL), so any of them can be reproduced.
+
+| Screenshot | What it shows | Reproduce |
+|---|---|---|
+| Demo walkthrough | Every behavior end to end, with status codes and outcomes | `./scripts/demo-readable.sh` |
+| Idempotency | 201 then 200 with `Idempotent-Replayed`; 422 for a changed payload; 8 parallel retries create one payment | `./scripts/scenarios.sh idempotency` |
+| Webhook redelivery | Redeliveries and a late authorization absorbed; 10 parallel deliveries applied once; no review cases | `./scripts/scenarios.sh duplicate-webhook` |
+| Amount mismatch | Payment held (202), provider told to redeliver (409), operator must decide, release, recovery | `./scripts/scenarios.sh amount-mismatch` |
+| Settlement | Four racing runs create one batch; a payment with a refund requested is skipped | `./scripts/scenarios.sh settlement` |
+| Reconciliation | A verdict per report row; importing the same report again changes nothing | `./scripts/scenarios.sh reconciliation` |
+| Audit trail | Case file timeline: every step with its actor and the request id that caused it | `./scripts/scenarios.sh audit-trail` |
+| Tests | 85 tests passing on H2 and on PostgreSQL | `./mvnw test` |
+
+### Demo walkthrough
+
+![Demo walkthrough](docs/screenshots/03-demo-script-output.png)
+
+### Idempotency
+
+![Idempotency replay](docs/screenshots/04-idempotency-replay.png)
+
+### Webhook redelivery
+
+![Duplicate webhook ignored](docs/screenshots/05-duplicate-webhook-ignored.png)
+
+### Amount mismatch: hold, decide, recover
+
+![Amount mismatch manual review](docs/screenshots/06-amount-mismatch-manual-review.png)
+
+### Settlement
+
+![Settlement batch](docs/screenshots/07-settlement-batch.png)
+
+### Reconciliation
+
+![Reconciliation verdicts](docs/screenshots/08-reconciliation-mismatch.png)
+
+### Audit trail
+
+![Audit trail](docs/screenshots/09-audit-trail.png)
+
+### Tests on H2 and PostgreSQL
+
+![Local tests](docs/screenshots/10-local-tests.png)
 
 ---
 
@@ -433,10 +488,6 @@ No billing risk, no secrets, no compliance concerns. The value is in the behavio
 - [Interview Defense](docs/interview-defense.md)
 - [Architecture Decision Records](docs/adr)
 
-## Demo Screenshots
-
-The screenshots in [docs/screenshots](docs/screenshots) were captured from the earlier version of the project (before the inbox, review decisions, and HTTP status changes). Run `./scripts/demo-readable.sh` for the current behavior.
-
 ---
 
 ## Continuous Verification
@@ -464,7 +515,7 @@ Intentional omissions:
 
 ## What To Review First
 
-1. Run `./scripts/demo-readable.sh`
+1. Run `./scripts/demo-readable.sh`, or one `./scripts/scenarios.sh` scenario
 2. `ProviderWebhookService`: the decision order and why each outcome has its status code
 3. `PaymentIntent`: the state machine and hold rules
 4. `ReviewWorkflowService`: how resolutions become decisions
