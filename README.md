@@ -2,9 +2,9 @@
 
 ![CI](https://github.com/fattah247/Payflow-reliability/actions/workflows/ci.yml/badge.svg)
 
-A local-first Spring Boot backend that simulates reliability problems commonly found in payment systems: duplicate requests, webhook retries, invalid state changes, settlement mismatches, refund timing, manual review, and auditability.
+A local-first Spring Boot backend that simulates reliability problems commonly found in payment systems: duplicate requests, webhook retries and reordering, invalid state changes, concurrent writers, settlement mismatches, refund timing, manual review, and auditability.
 
-This project is intentionally small. The goal is not to look senior by adding cloud services, microservices, Kafka, or managed infrastructure. The goal is to show backend judgment around state correctness, failure handling, and operational traceability.
+This project is intentionally small. The goal is not to look senior by adding cloud services, microservices, Kafka, or managed infrastructure. The goal is to show backend judgment around state correctness, failure handling, and operational traceability, and to prove it with tests that run against the real database.
 
 > This is a public-safe educational project based on common payment engineering patterns. It does not use proprietary employer code, architecture, data, naming, business rules, logs, screenshots, or internal workflows.
 
@@ -12,19 +12,19 @@ This project is intentionally small. The goal is not to look senior by adding cl
 
 ## What This Project Proves
 
-This repo is built to demonstrate practical backend reliability thinking:
-
-- payment intent lifecycle design
-- idempotency handling for retried client requests
-- duplicate provider webhook detection
-- guarded transaction state transitions
-- settlement batch creation
-- reconciliation mismatch detection
-- manual review workflow
-- refund timing rules
-- audit trail generation
-- business-invariant testing
-- CI verification with GitHub Actions
+- payment intent lifecycle design with guarded transitions
+- idempotency for retried client requests, **including two retries racing each other**
+- a webhook inbox: every provider event recorded once, with an explicit outcome
+- duplicate, re-sent, and out-of-order provider webhooks absorbed without human toil
+- per-payment serialization (row locks) plus optimistic versioning as a safety net
+- settlement that can never pay the same transaction out twice, even under concurrent runs
+- reconciliation with a per-row verdict, safe to re-import
+- a manual review queue whose resolutions make real decisions (release, fail, reverse, approve or reject refund)
+- refunds that are full, retry-safe, and approval-gated after reconciliation
+- an audit trail and a per-payment case file that answer "what happened and what is it waiting on?"
+- error responses that tell clients and the provider whether retrying can help
+- explicit, versioned schema (Flyway) validated against the entities at startup
+- CI on both H2 and PostgreSQL
 
 The important part is not the framework. The important part is how the system behaves when things go wrong.
 
@@ -35,10 +35,12 @@ The important part is not the framework. The important part is how the system be
 Payment systems often fail in boring but expensive ways:
 
 - a client retries the same request and accidentally creates duplicate payments
-- a provider sends the same webhook more than once
+- a provider sends the same webhook more than once, or sends events out of order
 - a late webhook contradicts the current local state
+- two settlement jobs run at once and pay a merchant twice
 - a provider report does not match local records
 - a refund is requested after settlement or reconciliation
+- a payment is put "on hold" and nobody is ever responsible for releasing it
 - operators need to understand what happened after the fact
 
 This project models those failure modes in a safe, local, public portfolio repo.
@@ -47,57 +49,37 @@ This project models those failure modes in a safe, local, public portfolio repo.
 
 ## Tech Stack
 
-- Java 21
-- Spring Boot
-- Spring Web
-- Spring Data JPA
-- PostgreSQL for local runtime
-- H2 for tests
-- Maven Wrapper
-- Docker Compose
-- GitHub Actions
+- Java 21, Spring Boot 3.5 (Web, Validation, Data JPA, Actuator)
+- PostgreSQL 16 for local runtime, H2 (PostgreSQL mode) for fast tests
+- Flyway for schema migrations; Hibernate runs in `validate` mode
+- Micrometer metrics via Actuator
+- Maven Wrapper, Docker Compose, GitHub Actions
 
 ---
 
 ## Architecture
 
 ```text
-Client / Merchant API
+Client / Merchant API          Fake provider             Operations
+        |                            |                        |
+        v                            v                        v
+Spring Boot modular monolith (one transaction per request, per-payment row lock)
         |
-        v
-Spring Boot Backend
-        |
-        ├── payment
-        │   ├── payment intent creation
-        │   ├── idempotency handling
-        │   ├── state transitions
-        │   └── fake provider webhook handling
-        |
-        ├── settlement
-        │   ├── settlement batch creation
-        │   └── settlement batch items
-        |
-        ├── reconciliation
-        │   ├── provider report import
-        │   └── mismatch detection
-        |
-        ├── review
-        │   ├── manual review cases
-        │   └── review resolution
-        |
-        ├── refund
-        │   ├── refund request
-        │   └── refund completion
-        |
-        └── audit
-            └── append-style audit events
+        ├── payment         intents, idempotency, state machine, webhook inbox, provider transactions
+        ├── settlement      payout batches (one currency per batch)
+        ├── reconciliation  provider report import, per-row verdicts
+        ├── review          review queue, resolution decisions, allowed actions
+        ├── refund          full refunds, replay-safe, approval after reconciliation
+        ├── operations      payment case file, operations summary
+        ├── audit           append-style audit events linked to payment + request id
+        └── common          error codes, request id correlation, database error mapping
 
-PostgreSQL
-        |
-        ├── payment_intents
-        ├── payment_transactions
+PostgreSQL (schema owned by Flyway: src/main/resources/db/migration)
+        ├── payment_intents         unique (merchant_id, idempotency_key), hold-state check
+        ├── payment_transactions    unique provider_transaction_id
+        ├── provider_events         unique provider_event_id (webhook inbox)
         ├── settlement_batches
-        ├── settlement_batch_items
+        ├── settlement_batch_items  unique transaction_id (never paid out twice)
         ├── review_cases
         ├── refund_requests
         └── audit_events
@@ -105,44 +87,36 @@ PostgreSQL
 
 ---
 
-## Main Flow
+## Webhook Decision Flow
+
+Every authenticated delivery gets exactly one outcome. Expected outcomes are returned, not thrown, so the review cases and audit events they create are committed.
 
 ```mermaid
 flowchart TD
-    A[Merchant API Client] --> B[Create Payment Intent]
-    B --> C[Check Idempotency Key]
-
-    C --> D[New Payment Intent]
-    C --> E[Return Existing Intent]
-    C --> F[Reject Different Payload]
-
-    D --> G[Start Payment]
-    E --> G
-    G --> H[Payment Pending]
-
-    H --> I[Fake Provider Webhook]
-    I --> J[Validate Signature]
-    J --> K[Check Duplicate Event]
-    K --> L[Check Amount and Currency]
-
-    L --> M[Apply Provider Status]
-    M --> N[Save Payment Transaction]
-
-    J --> O[Manual Review]
-    K --> O
-    L --> O
-
-    N --> P[Create Settlement Batch]
-    P --> Q[Payment Settled]
-
-    Q --> R[Import Reconciliation Report]
-    R --> S[Compare Provider Report]
-    S --> T[Payment Reconciled]
-    S --> O
-
-    O --> U[Audit Trail]
-    T --> U
+    A[POST /fake-provider/webhook] --> B{Signature valid?}
+    B -- No --> B1[401 INVALID_SIGNATURE<br/>nothing persisted]
+    B -- Yes --> C[Lock payment row]
+    C --> D{Event id already in inbox?}
+    D -- Same payload --> D1[200 DUPLICATE_IGNORED]
+    D -- Different payload --> D2[202 SENT_TO_REVIEW<br/>PROVIDER_EVENT_CONFLICT]
+    D -- No --> E{Payment exists?}
+    E -- No --> E1[202 SENT_TO_REVIEW<br/>PAYMENT_INTENT_NOT_FOUND]
+    E -- Yes --> F{Payment on hold?}
+    F -- Yes --> F1[409 PAYMENT_ON_HOLD<br/>not recorded, provider redelivers later]
+    F -- No --> G{Currency / amount match?}
+    G -- No --> G1[Hold payment if in flight<br/>202 SENT_TO_REVIEW]
+    G -- Yes --> H{Provider tx owned by another payment?}
+    H -- Yes --> H1[202 SENT_TO_REVIEW<br/>PROVIDER_TRANSACTION_CONFLICT]
+    H -- No --> I{Status already recorded for this tx?}
+    I -- Yes --> I1[200 DUPLICATE_IGNORED]
+    I -- No --> J{AUTHORIZED after capture?}
+    J -- Yes --> J1[200 STALE_IGNORED]
+    J -- No --> K{Transition valid?}
+    K -- No --> K1[Hold payment if in flight<br/>202 SENT_TO_REVIEW<br/>INVALID_STATE_TRANSITION]
+    K -- Yes --> L[Apply transition, upsert provider tx<br/>200 APPLIED]
 ```
+
+Status codes are chosen for the provider's retry logic: **2xx means stop retrying** (200 handled, 202 accepted for human review), **409 PAYMENT_ON_HOLD means redeliver later**, 401 means the signature is wrong.
 
 ---
 
@@ -152,7 +126,7 @@ flowchart TD
 stateDiagram-v2
     [*] --> CREATED
 
-    CREATED --> PENDING
+    CREATED --> PENDING: start
     CREATED --> EXPIRED
 
     PENDING --> AUTHORIZED
@@ -165,114 +139,37 @@ stateDiagram-v2
     AUTHORIZED --> EXPIRED
     AUTHORIZED --> REVERSAL_REQUIRED
 
-    SUCCESS --> SETTLED
+    SUCCESS --> SETTLED: settlement batch
     SUCCESS --> REFUND_REQUESTED
     SUCCESS --> REVERSAL_REQUIRED
 
-    SETTLED --> RECONCILED
+    SETTLED --> RECONCILED: clean report row
     SETTLED --> REFUND_REQUESTED
+
+    RECONCILED --> REFUND_REQUESTED: refund approved in review
 
     REFUND_REQUESTED --> REFUNDED
 
-    CREATED --> MANUAL_REVIEW
-    PENDING --> MANUAL_REVIEW
-    AUTHORIZED --> MANUAL_REVIEW
-    SUCCESS --> MANUAL_REVIEW
-    SETTLED --> MANUAL_REVIEW
+    CREATED --> MANUAL_REVIEW: mismatch hold
+    PENDING --> MANUAL_REVIEW: mismatch hold
+    AUTHORIZED --> MANUAL_REVIEW: mismatch hold
+    SUCCESS --> MANUAL_REVIEW: mismatch or contradiction hold
+    SETTLED --> MANUAL_REVIEW: mismatch or contradiction hold
+
+    MANUAL_REVIEW --> FAILED: FAIL_PAYMENT, if never captured
+    MANUAL_REVIEW --> REVERSAL_REQUIRED: REQUIRE_REVERSAL, if authorized or captured
+    note right of MANUAL_REVIEW
+        RELEASE_PAYMENT returns the payment
+        to the state it was held from
+    end note
 
     FAILED --> [*]
     EXPIRED --> [*]
-    RECONCILED --> [*]
     REFUNDED --> [*]
     REVERSAL_REQUIRED --> [*]
-    MANUAL_REVIEW --> [*]
 ```
 
----
-
-## Demo Screenshots
-
-These screenshots show the project as a runnable backend system, not only source code.
-
-| Screenshot | What it proves |
-|---|---|
-| Repo overview | The project purpose is clear from the first scan |
-| CI passing | Tests are continuously verified |
-| Demo script output | The full local flow runs end-to-end |
-| Idempotency replay | Retried client requests return the same payment intent |
-| Duplicate webhook ignored | Provider retry events do not create duplicate transactions |
-| Manual review from mismatch | Unsafe provider data is isolated for review |
-| Settlement batch | Successful transactions can be grouped and settled |
-| Reconciliation mismatch | Provider report differences create review cases |
-| Audit trail | State changes and decisions are traceable |
-| Local tests | Business invariants are tested locally |
-
-### 1. Repo overview
-
-![Repo overview](docs/screenshots/01-repo-overview.png)
-
-### 2. CI passing
-
-![CI passing](docs/screenshots/02-ci-passing.png)
-
-### 3. Demo script output
-
-![Demo script output](docs/screenshots/03-demo-script-output.png)
-
-### 4. Idempotency replay
-
-![Idempotency replay](docs/screenshots/04-idempotency-replay.png)
-
-### 5. Duplicate webhook ignored
-
-![Duplicate webhook ignored](docs/screenshots/05-duplicate-webhook-ignored.png)
-
-### 6. Amount mismatch creates manual review
-
-![Amount mismatch manual review](docs/screenshots/06-amount-mismatch-manual-review.png)
-
-### 7. Settlement batch
-
-![Settlement batch](docs/screenshots/07-settlement-batch.png)
-
-### 8. Reconciliation mismatch
-
-![Reconciliation mismatch](docs/screenshots/08-reconciliation-mismatch.png)
-
-### 9. Audit trail
-
-![Audit trail](docs/screenshots/09-audit-trail.png)
-
-### 10. Local tests
-
-![Local tests](docs/screenshots/10-local-tests.png)
-
----
-
-## Project Layout
-
-```text
-.
-├── .github/workflows/ci.yml
-├── docs
-│   ├── adr
-│   ├── demo-flow.md
-│   ├── failure-scenarios.md
-│   ├── interview-defense.md
-│   ├── security-review.md
-│   └── screenshots
-├── scripts
-│   └── demo.sh
-├── src/main/java/id/fatarc/portfolio/payflowreliability
-│   ├── audit
-│   ├── common
-│   ├── payment
-│   ├── reconciliation
-│   ├── refund
-│   ├── review
-│   └── settlement
-└── src/test/java/id/fatarc/portfolio/payflowreliability
-```
+`MANUAL_REVIEW` is no longer a dead end. A held payment remembers `stateBeforeReview`, and releasing it returns there. Final outcomes (`FAILED`, `EXPIRED`, `REFUNDED`, ...) are facts and are never overwritten by a hold.
 
 ---
 
@@ -282,7 +179,7 @@ These screenshots show the project as a runnable backend system, not only source
 
 - JDK 21
 - Docker
-- Maven, or use the included Maven Wrapper
+- Maven, or the included Maven Wrapper
 
 ### 1. Start PostgreSQL
 
@@ -290,32 +187,22 @@ These screenshots show the project as a runnable backend system, not only source
 docker compose up -d postgres
 ```
 
+> Upgrading from a version before Flyway? The old schema was created by Hibernate and has no migration history, so startup stops with a clear Flyway error. Reset the local volume once: `docker compose down -v && docker compose up -d postgres`.
+
 ### 2. Run the app
-
-Using Maven:
-
-```bash
-mvn spring-boot:run
-```
-
-Or using Maven Wrapper:
 
 ```bash
 ./mvnw spring-boot:run
 ```
 
+Flyway applies the migrations, then Hibernate validates the entities against the schema.
+
+No local JDK? `docker compose up --build` builds the image and runs the app and PostgreSQL together.
+
 ### 3. Health check
 
 ```bash
 curl http://localhost:8080/actuator/health
-```
-
-Expected result:
-
-```json
-{
-  "status": "UP"
-}
 ```
 
 ---
@@ -326,320 +213,182 @@ Expected result:
 ./mvnw test
 ```
 
-The tests focus on business invariants, not only successful HTTP responses.
+The same suite runs against PostgreSQL by pointing Spring at it (CI does both):
 
-Current coverage includes:
+```bash
+SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/payflow_reliability SPRING_DATASOURCE_USERNAME=payflow_reliability SPRING_DATASOURCE_PASSWORD=payflow_reliability ./mvnw test
+```
 
-- same idempotency key returns the original payment intent
-- same idempotency key with a different payload is rejected
-- missing idempotency key is rejected
-- duplicate success webhook is ignored
-- contradictory late webhook does not rewrite a successful payment
-- amount mismatch creates manual review
-- every state change writes an audit event
-- settlement marks a payment as settled
-- matching reconciliation moves a payment to reconciled
-- mismatched reconciliation creates review cases
-- refund after reconciliation is blocked
+Tests are **not** wrapped in a test-managed transaction: every service call commits or rolls back exactly as in production. That matters. The earlier suite ran each test inside one transaction, which hid review cases and audit events being rolled back on rejection paths.
+
+What is covered (85 tests):
+
+- idempotency: replay, payload mismatch, per-merchant key scope, 8 concurrent creates with one key produce one intent
+- webhooks: every outcome in the flow above, authorization-then-capture on one provider transaction, contradictions hold in-flight payments, unknown payment persisted for review, forged signature writes nothing, 6 concurrent identical deliveries apply exactly once, conflicting concurrent events serialize
+- settlement: ineligible and contradicted payments skipped instead of failing the batch, 4 concurrent runs pay out once, a run racing refunds and reversal webhooks stays consistent, per-currency batches
+- reconciliation: per-row outcomes, safe re-import, duplicate rows, matched-but-unsettled rows
+- refunds: full refund lifecycle, partial refund rejected, retry replay, 5 concurrent requests create one refund, reconciled refund pending review, completion blocked while the provider contradicts the payment
+- review: allowed actions, release / fail / reverse / approve / reject, chargeback after settlement, double resolution, two operators racing, resolution racing provider events
+- HTTP contract: status codes, `Location`, `Idempotent-Replayed`, `X-Request-Id`, error codes, amount precision, case file, operations summary
+- domain state machine rules in isolation
+
+The concurrency tests were checked by mutation: removing the payment row lock, the settlement payment locks, or the version columns plus the batch-item unique constraint makes them fail (the last reproduces the original bug: four batches for the same transactions).
 
 ---
 
-## Run Full Demo Flow
+## Run the Demo
 
-The easiest way to see the project behavior is:
-
-```bash
-./scripts/demo.sh
-```
-
-The demo script performs this flow:
-
-1. create payment intent
-2. replay the same request with the same idempotency key
-3. start payment execution
-4. send fake provider success webhook
-5. create settlement batch
-6. send reconciliation report with mismatch
-7. print open review cases
-8. print audit trail
-
-If the script was already run before and fixed demo IDs collide, reset the local database:
+With the app running:
 
 ```bash
-docker compose down -v
-docker compose up -d postgres
+./scripts/demo-readable.sh
 ```
 
-Then restart the app and run the demo again.
+A narrated walkthrough: idempotent creation, authorization then capture, absorbed provider noise, an amount mismatch that is held, deferred, released and recovered, settlement, reconciliation verdicts, an approval-gated refund, a case file, and the operations summary.
+
+`./scripts/demo.sh` is the short version. Both scripts use fresh ids on every run, so they can be repeated without resetting the database.
 
 ---
 
-## API Endpoints
+## API
 
-### Payment Intents
+### Payment intents
 
-```http
-POST /api/payment-intents
-POST /api/payment-intents/{paymentIntentId}/start
-GET  /api/payment-intents/{paymentIntentId}
-```
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/payment-intents` | Requires `Idempotency-Key` (per merchant, max 100 chars). **201** + `Location` when created; **200** + `Idempotent-Replayed: true` on replay; **422** `IDEMPOTENCY_KEY_REUSED` if the payload differs |
+| POST | `/api/payment-intents/{id}/start` | Retrying a start on a PENDING payment is a no-op |
+| GET | `/api/payment-intents/{id}` | |
+| GET | `/api/payment-intents/{id}/case-file` | Everything about one payment: attention summary, provider transactions, provider events and their outcomes, settlement, refunds, review cases with allowed actions, full audit timeline |
 
-### Fake Provider Webhook
+### Fake provider webhook
 
-```http
-POST /fake-provider/webhook
-```
-
-Required header:
-
-```http
-X-Provider-Signature: local-demo-signature
-```
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/fake-provider/webhook` | Header `X-Provider-Signature: local-demo-signature`. Returns a `WebhookResponse` with `outcome`, `detail`, `reviewReason`, `reviewCaseId`, `originalOutcome` (for redeliveries) and the payment |
 
 ### Settlement
 
-```http
-POST /api/settlements/batches?merchantId=<merchant-id>
-GET  /api/settlements/batches
-GET  /api/settlements/batches/{batchId}/items
-```
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/settlements/batches?merchantId=&currency=` | **201**. `currency` is needed only if the merchant has eligible payments in several currencies (**422** `SETTLEMENT_CURRENCY_REQUIRED` lists them). **409** `NOTHING_TO_SETTLE` |
+| GET | `/api/settlements/batches?merchantId=` | Newest first |
+| GET | `/api/settlements/batches/{batchId}/items` | **404** for an unknown batch |
 
 ### Reconciliation
 
-```http
-POST /api/reconciliation/reports
-```
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/reconciliation/reports` | Up to 1000 rows per import. Returns counts plus one verdict per row: `RECONCILED`, `ALREADY_RECONCILED`, `MATCHED_NO_ACTION`, `MISMATCH` (with reasons and review case ids), `NOT_FOUND_LOCALLY`, `DUPLICATE_ROW` |
 
-### Review Cases
+### Review cases
 
-```http
-GET  /api/review-cases
-POST /api/review-cases/{reviewCaseId}/resolve
-```
-
-### Audit Events
-
-```http
-GET /api/audit-events?aggregateType=PAYMENT_INTENT&aggregateId=<payment-intent-id>
-```
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/review-cases?status=OPEN\|RESOLVED\|ALL&reason=&paymentIntentId=` | Oldest first; defaults to open. Each case includes `paymentState` and `allowedActions` |
+| GET | `/api/review-cases/{id}` | |
+| POST | `/api/review-cases/{id}/resolve` | Body `{actor, note, action}`; `action` defaults to `ACKNOWLEDGE`. **422** `RESOLUTION_ACTION_NOT_APPLICABLE` explains what is allowed and why |
 
 ### Refunds
 
-```http
-POST /api/refunds/payment-intents/{paymentIntentId}
-POST /api/refunds/{refundId}/complete
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/refunds/payment-intents/{paymentIntentId}` | Full amount only (**422** otherwise). **201** `REQUESTED`; **202** `PENDING_REVIEW` for a reconciled payment; **200** + `Idempotent-Replayed: true` if the payment already has this refund |
+| GET | `/api/refunds/payment-intents/{paymentIntentId}` | |
+| GET | `/api/refunds/{refundId}` | |
+| POST | `/api/refunds/{refundId}/complete` | Completing a completed refund is a no-op; **409** `REFUND_NOT_COMPLETABLE` while pending review or after rejection |
+
+### Audit and operations
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/audit-events?paymentIntentId=` | Every event about one payment, across aggregates |
+| GET | `/api/audit-events?aggregateType=&aggregateId=` | One aggregate's own events |
+| GET | `/api/operations/summary` | Payments per state, open review queue by reason and age, payments on hold, refunds waiting, and settlement backlog per merchant and currency |
+| GET | `/actuator/metrics/payflow.webhook.events` | Tagged by `outcome` and `reason`; also `payflow.webhook.rejected`, `payflow.review.cases.opened` |
+
+### Errors
+
+Every non-2xx response has the same shape:
+
+```json
+{
+  "timestamp": "2026-10-12T09:43:45.173830Z",
+  "status": 409,
+  "error": "Conflict",
+  "code": "PAYMENT_ON_HOLD",
+  "message": "Payment a41b6477-... is on hold for manual review. Redeliver this event after the review is resolved.",
+  "retryable": true,
+  "requestId": "4f12f4a7-431a-45f2-9113-e3038522ffc7"
+}
 ```
+
+- `code` is stable and machine-readable (`ErrorCode` lists them all).
+- `retryable` says whether sending the exact same request again can succeed. `CONCURRENT_MODIFICATION`, `PAYMENT_ON_HOLD` and `INTERNAL_ERROR` are retryable; validation, business-rule rejections and `DATA_INTEGRITY_ERROR` (a deterministic constraint failure) are not.
+- `requestId` matches the `X-Request-Id` response header, the log lines for that request, and the `requestId` stored on audit events. Send your own `X-Request-Id` (letters, digits, `.`, `_`, `-`, up to 64) to correlate across systems.
+
+Amounts accept at most 2 decimal places and are returned at that scale everywhere. Previously `100.005` was echoed back to the client but silently stored as `100.01`.
 
 ---
 
-## Example Requests
-
-### Create a payment intent
+## Example: an amount mismatch, end to end
 
 ```bash
-curl -X POST http://localhost:8080/api/payment-intents \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: payment-001' \
-  -d '{
-    "merchantId": "merchant-demo-01",
-    "merchantReference": "ORDER-1001",
-    "amount": 125000,
-    "currency": "IDR"
-  }'
-```
-
-### Replay the same request
-
-Use the same `Idempotency-Key` and the same payload:
-
-```bash
-curl -X POST http://localhost:8080/api/payment-intents \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: payment-001' \
-  -d '{
-    "merchantId": "merchant-demo-01",
-    "merchantReference": "ORDER-1001",
-    "amount": 125000,
-    "currency": "IDR"
-  }'
-```
-
-Expected behavior:
-
-- the existing payment intent is returned
-- a duplicate payment intent is not created
-- an audit event is recorded
-
-### Start payment execution
-
-```bash
-curl -X POST http://localhost:8080/api/payment-intents/<payment-intent-id>/start
-```
-
-Expected behavior:
-
-```text
-CREATED -> PENDING
-```
-
-### Send a fake provider success webhook
-
-```bash
+# provider reports 124000 for a 125000 payment
 curl -X POST http://localhost:8080/fake-provider/webhook \
+  -H 'Content-Type: application/json' -H 'X-Provider-Signature: local-demo-signature' \
+  -d '{"providerEventId": "evt-001", "providerTransactionId": "provider-tx-001",
+       "paymentIntentId": "<id>", "status": "SUCCESS", "amount": 124000, "currency": "IDR"}'
+```
+
+```json
+{
+  "providerEventId": "evt-001",
+  "outcome": "SENT_TO_REVIEW",
+  "detail": "Webhook amount 124000 does not match payment amount 125000.00. Payment held in MANUAL_REVIEW.",
+  "reviewReason": "AMOUNT_MISMATCH",
+  "reviewCaseId": "7541caac-...",
+  "paymentIntent": { "state": "MANUAL_REVIEW", "stateBeforeReview": "PENDING", "...": "..." }
+}
+```
+
+The provider's corrected event now gets `409 PAYMENT_ON_HOLD` (retryable), so the provider keeps it. The review queue tells the operator what they can do:
+
+```bash
+curl 'http://localhost:8080/api/review-cases?paymentIntentId=<id>'
+# ... "allowedActions": ["RELEASE_PAYMENT", "FAIL_PAYMENT"]
+
+curl -X POST http://localhost:8080/api/review-cases/<case-id>/resolve \
   -H 'Content-Type: application/json' \
-  -H 'X-Provider-Signature: local-demo-signature' \
-  -d '{
-    "providerEventId": "evt-001",
-    "providerTransactionId": "provider-tx-001",
-    "paymentIntentId": "<payment-intent-id>",
-    "status": "SUCCESS",
-    "amount": 125000,
-    "currency": "IDR"
-  }'
+  -d '{"actor": "ops-ana", "note": "Provider confirmed a display bug", "action": "RELEASE_PAYMENT"}'
 ```
 
-Expected behavior:
-
-```text
-PENDING -> SUCCESS
-```
-
-A `PaymentTransaction` is saved.
-
-### Create a settlement batch
-
-```bash
-curl -X POST 'http://localhost:8080/api/settlements/batches?merchantId=merchant-demo-01'
-```
-
-Expected behavior:
-
-```text
-SUCCESS -> SETTLED
-```
-
-### Import a reconciliation report
-
-```bash
-curl -X POST http://localhost:8080/api/reconciliation/reports \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "rows": [
-      {
-        "providerTransactionId": "provider-tx-001",
-        "amount": 125000,
-        "currency": "IDR",
-        "providerStatus": "SUCCESS",
-        "settlementDate": "2026-01-01"
-      }
-    ]
-  }'
-```
-
-If the provider report matches local records, the payment can move from:
-
-```text
-SETTLED -> RECONCILED
-```
-
-If the report does not match, the system creates a review case.
-
-### View open review cases
-
-```bash
-curl http://localhost:8080/api/review-cases
-```
-
-### View audit trail
-
-```bash
-curl 'http://localhost:8080/api/audit-events?aggregateType=PAYMENT_INTENT&aggregateId=<payment-intent-id>'
-```
+The payment returns to `PENDING`, the provider's next redelivery is `APPLIED`, and the case file shows the whole story.
 
 ---
 
 ## Failure Scenarios Modeled
 
-### Duplicate client request
+See [docs/failure-scenarios.md](docs/failure-scenarios.md) for each scenario with its expected behavior and the test that proves it. In short:
 
-A client sends the same create-payment request twice with the same idempotency key.
-
-Expected behavior:
-
-- return the original payment intent
-- do not create a duplicate payment intent
-- record an idempotency replay audit event
-
-### Reused idempotency key with different payload
-
-A client reuses the same idempotency key but changes amount, currency, merchant reference, or merchant ID.
-
-Expected behavior:
-
-- reject the request
-- do not mutate the original payment intent
-
-### Duplicate provider webhook
-
-A fake provider sends the same event twice.
-
-Expected behavior:
-
-- ignore the duplicate
-- create a review case
-- record an audit event
-- do not create a duplicate transaction
-
-### Duplicate provider transaction with new event ID
-
-A provider sends a new event ID but the same provider transaction ID.
-
-Expected behavior:
-
-- treat it as suspicious
-- create a review case
-- do not create another transaction
-
-### Amount or currency mismatch
-
-A webhook amount or currency does not match the local payment intent.
-
-Expected behavior:
-
-- move payment intent to `MANUAL_REVIEW`
-- create a review case
-- record an audit event
-- avoid unsafe state mutation
-
-### Invalid late transition
-
-A webhook tries to apply a transition that is no longer valid.
-
-Expected behavior:
-
-- do not force the state change
-- create a review case
-- record an ignored webhook audit event
-
-### Reconciliation mismatch
-
-A provider report does not match local transaction data.
-
-Expected behavior:
-
-- create review cases for mismatches
-- record reconciliation audit events
-- only reconcile clean matched records
-
-### Refund after reconciliation
-
-A refund is requested after a payment has already been reconciled.
-
-Expected behavior:
-
-- block direct refund
-- require manual review
-- record the blocked refund attempt
+| Scenario | Behavior |
+|---|---|
+| Client retries create | Same intent returned; concurrent retries also converge on one intent |
+| Same key, different payload | 422, original untouched |
+| Provider redelivers an event | 200 `DUPLICATE_IGNORED`, no review case (retries are normal, not incidents) |
+| Same event id, different payload | Review case `PROVIDER_EVENT_CONFLICT` |
+| Authorization then capture on one provider transaction | Both applied; payment becomes settleable |
+| Authorization arrives after capture | 200 `STALE_IGNORED` |
+| Contradictory late event (FAILED after SUCCESS, chargeback after settlement) | In-flight payment held so nothing settles; final payment left alone; review case either way |
+| Contradiction on a refund-requested payment | Refund completion blocked until an operator resolves the case |
+| Amount or currency mismatch | In-flight payment held; final payment left alone; review case either way |
+| Event while payment is on hold | 409, provider redelivers after the review decision |
+| Forged signature | 401, nothing written |
+| Concurrent settlement runs | One batch; the others get 409; DB constraint guarantees no double payout |
+| Refund or reversal before settlement | Payment skipped by settlement instead of blocking the merchant's batch, even when they race the run |
+| Reconciliation mismatch | Per-row verdict plus review case; re-import is safe |
+| Refund after reconciliation | 202 `PENDING_REVIEW`; operator approves or rejects |
+| Partial refund | 422; full refunds only |
 
 ---
 
@@ -647,119 +396,79 @@ Expected behavior:
 
 ### Modular monolith over microservices
 
-This project is intentionally a modular monolith.
+Easier to run, test, and reason about; no fake distributed complexity. Correctness problems here are transaction problems, and a single database transaction is the right tool.
 
-Reason:
+### Per-payment serialization, optimistic versions as the safety net
 
-- easier to run locally
-- easier to test
-- easier to understand
-- no fake distributed complexity
-- better for demonstrating core transaction behavior
+Every flow that changes one payment takes a row lock on it first, so concurrent deliveries and requests for the same payment queue up and each sees the previous one's result. Settlement locks all its candidate payments in id order before touching their transactions, the same payment-then-transaction order webhooks use. Every mutable entity also has a `@Version`, and the schema enforces the invariants that must survive any bug: one intent per (merchant, key), one row per provider transaction, one inbox row per provider event, one settlement item per transaction. See [ADR 009](docs/adr/009-concurrency-control.md).
 
-### PostgreSQL locally, H2 for tests
+### Return outcomes, do not throw them
 
-PostgreSQL is used for local runtime to keep the project closer to real backend development.
+A duplicate webhook, a mismatch, or a refund that needs approval are expected outcomes, not errors. Returning them means the review case and audit event they create commit with the request. Throwing rolled them back silently. See [ADR 010](docs/adr/010-webhook-inbox-and-outcomes.md).
 
-H2 is used for tests to keep feedback fast and simple.
+### Review resolutions are decisions
 
-### No cloud deployment
+The queue exists to decide what happens to money, so resolving a case applies a decision, and each case advertises the decisions that are valid right now. See [ADR 011](docs/adr/011-review-decisions.md).
 
-There is no AWS, GCP, Azure, managed database, hosted queue, or paid observability.
+### Explicit schema
 
-Reason:
+`ddl-auto: update` silently mutates production schemas and cannot express the constraints above. Flyway owns the schema; Hibernate only validates. See [ADR 012](docs/adr/012-schema-migrations.md).
 
-- no billing risk
-- no secret management problem
-- easier for reviewers to run
-- portfolio value comes from correctness, not hosting
+### PostgreSQL locally, H2 and PostgreSQL in CI
 
-### Fake provider instead of real gateway
+H2 keeps the inner loop fast. PostgreSQL in CI catches what H2 hides. It already caught one: Hibernate classifies unique violations differently on PostgreSQL, which broke the idempotency race handling until the check moved to the portable SQLState.
 
-The provider webhook is simulated.
+### Fake provider, no cloud
 
-Reason:
-
-- avoids sensitive payment integrations
-- avoids compliance concerns
-- keeps the project public-safe
-- focuses on reliability behavior
-
-### Audit trail as a first-class concept
-
-State changes and important decisions are recorded as audit events.
-
-Reason:
-
-- payment systems need traceability
-- debugging requires historical context
-- manual review needs evidence
-- operators need to know why a state changed
+No billing risk, no secrets, no compliance concerns. The value is in the behavior, not the hosting.
 
 ---
 
 ## Documentation Map
 
 - [Demo Flow](docs/demo-flow.md)
+- [Architecture Flow](docs/architecture-flow.md)
 - [Failure Scenarios](docs/failure-scenarios.md)
 - [Security Review](docs/security-review.md)
 - [Interview Defense](docs/interview-defense.md)
 - [Architecture Decision Records](docs/adr)
 
+## Demo Screenshots
+
+The screenshots in [docs/screenshots](docs/screenshots) were captured from the earlier version of the project (before the inbox, review decisions, and HTTP status changes). Run `./scripts/demo-readable.sh` for the current behavior.
+
 ---
 
 ## Continuous Verification
 
-GitHub Actions runs on:
-
-- push to `main`
-- push to `dev`
-- push to `dev/**`
-- pull requests into `main`
-- pull requests into `dev`
-
-The workflow:
-
-1. checks out the repository
-2. sets up Java 21
-3. caches Maven dependencies
-4. runs tests with `./mvnw test`
-
-No deployment, registry publish, artifact publish, or scheduled workflow is included.
+GitHub Actions runs the full suite twice on every push to `main`, `dev`, `dev/**` and on pull requests into `main` and `dev`: once on H2 and once on a PostgreSQL 16 service container. No deployment, registry publish, or scheduled workflow is included.
 
 ---
 
 ## Limitations
 
-This project does not:
+Intentional omissions:
 
-- process real payments
-- connect to a real payment gateway
-- store card data
-- implement PCI-DSS compliance
-- represent any employer system
-- use proprietary architecture, data, logs, naming, or workflows
-- model distributed locking
-- model queue-based retries
-- model multi-region behavior
-- implement real authentication or authorization
-- implement production-grade observability
-
-These omissions are intentional.
+- no real payment gateway, card data, or PCI-DSS scope
+- no authentication or authorization on merchant or operations endpoints; the review `actor` is self-declared
+- the provider signature is a static shared secret compared in constant time, not an HMAC over the body with a timestamp
+- full refunds only; partial refunds need refunded-amount tracking and a partially-refunded state
+- reconciliation is one-sided: it checks reported rows against local data but does not yet flag local settled payments missing from a report
+- no expiry sweep for CREATED or PENDING payments that never hear back from the provider
+- open review cases are deduplicated by lookup, not by a database constraint, so two truly simultaneous identical problems can open two cases
+- a refund blocked by a contradiction can be completed after acknowledgement, but there is no action to cancel a requested refund
+- reconciliation does not lock payments, so two overlapping imports at the same moment can conflict (409, retryable; re-import is safe)
+- no multi-region behavior, queues, or distributed locking
 
 ---
 
 ## What To Review First
 
-For recruiters or engineers reviewing this repo quickly:
-
-1. Run `./scripts/demo.sh`
-2. Check the state machine diagram
-3. Check the test suite
-4. Check `PaymentIntent`
-5. Check `ProviderWebhookService`
-6. Check `SettlementService`
-7. Check `ReconciliationService`
-8. Check the audit and review flow
+1. Run `./scripts/demo-readable.sh`
+2. `ProviderWebhookService`: the decision order and why each outcome has its status code
+3. `PaymentIntent`: the state machine and hold rules
+4. `ReviewWorkflowService`: how resolutions become decisions
+5. `SettlementService` and `V1__baseline_schema.sql`: how double payout is prevented twice over
+6. `ProviderWebhookTest`, `SettlementTest`: the concurrency tests
 
 The core idea: this is a small backend system built around safe payment-state handling, not a generic CRUD tutorial.

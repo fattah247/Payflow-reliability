@@ -2,102 +2,84 @@
 
 ## Idempotency abuse
 
-Risk:
-An attacker or buggy client replays payment creation requests.
+Risk: an attacker or buggy client replays payment creation requests.
 
-Example attack:
-The same request is sent multiple times after a timeout.
+Example attack: the same request is sent many times after a timeout, including concurrently.
 
-Impact:
-Duplicate intents or duplicated downstream processing.
+Impact: duplicate intents or duplicated downstream processing.
 
-Mitigation in this repo:
-Same `Idempotency-Key` and same payload returns the existing intent. A changed payload with the same key is rejected.
+Mitigation in this repo: same key and payload returns the existing intent; a changed payload is rejected with 422. A unique constraint on (merchant, key) decides concurrent retries. Keys are scoped per merchant, so one merchant cannot probe another's keys.
 
-Remaining limitation:
-The key is request-scoped and not rate-limited.
+Remaining limitation: no rate limiting. `merchantId` comes from the request body because there is no authentication.
 
 ## Webhook spoofing
 
-Risk:
-An attacker sends a forged provider callback.
+Risk: an attacker sends a forged provider callback.
 
-Example attack:
-A fake success webhook is posted to the webhook endpoint.
+Impact: false success, state corruption.
 
-Impact:
-State corruption or false transaction success.
+Mitigation in this repo: the shared signature is compared in constant time. A missing or wrong signature returns 401 **before anything is written**.
 
-Mitigation in this repo:
-The fake provider endpoint requires a configured signature and rejects invalid signatures.
+Remaining limitation: the signature is a static shared secret (similar to some regional providers' callback tokens), not an HMAC over the body with a timestamp, so it does not prove body integrity or bound replay windows.
 
-Remaining limitation:
-The signature is a simple local demo secret, not a real HMAC implementation.
+## Review-queue flooding
 
-## Replay attack
+Risk: unauthenticated requests create review cases or audit rows.
 
-Risk:
-The same webhook is delivered more than once.
+Example attack: thousands of forged webhooks with random event ids.
 
-Example attack:
-The provider retries an event after a slow response.
+Impact: operators drown in noise; storage grows.
 
-Impact:
-Duplicate transaction rows or repeated state transitions.
+Mitigation in this repo: rejected signatures persist nothing; they are logged at WARN and counted in `payflow.webhook.rejected`. Authenticated but repeated problems reuse the open case for the same reason and subject.
 
-Mitigation in this repo:
-Provider event id and provider transaction id are checked before processing.
+Remaining limitation: open-case deduplication is a lookup, not a database constraint.
 
-Remaining limitation:
-The system uses synchronous processing and does not model distributed replay defense.
+## Replay and duplicate delivery
+
+Risk: the same webhook is delivered more than once, possibly concurrently.
+
+Impact: duplicate transaction rows or repeated state transitions.
+
+Mitigation in this repo: the webhook inbox has a unique event id, payment rows are locked while an event is processed, and payments carry an optimistic version. A reused event id with a different payload goes to review.
+
+Remaining limitation: no time window; very old valid events are still processed (and usually end as duplicates or contradictions).
+
+## Concurrent money movement
+
+Risk: two requests or jobs act on the same money at once.
+
+Example: two settlement runs; a double-clicked refund; two operators resolving the same case.
+
+Mitigation in this repo: per-payment row locks, optimistic versions, and database uniqueness (one settlement item per transaction, one inbox row per event, one provider transaction row per id). Losing requests get 409 and change nothing.
 
 ## Invalid state transition
 
-Risk:
-Late or contradictory events rewrite already-final states.
+Risk: late or contradictory events rewrite final states.
 
-Example attack:
-A failed event arrives after success.
-
-Impact:
-State regression and broken settlement logic.
-
-Mitigation in this repo:
-The state machine rejects invalid transitions and creates a review case.
-
-Remaining limitation:
-No external rule engine or operator override flow is implemented.
+Mitigation in this repo: the state machine rejects invalid transitions, holds an in-flight payment so it cannot settle while the provider disagrees, and opens a review case. Holds apply only to in-flight states, so a final outcome such as `REFUNDED` can never be overwritten by a suspicious event.
 
 ## Refund abuse
 
-Risk:
-Refunds are requested after reconciliation without additional control.
+Risk: refunds on reconciled payments without additional control; refunds for more or less than was paid.
 
-Example attack:
-An operator tries to refund a reconciled transaction directly.
+Mitigation in this repo: refunds after reconciliation require an operator decision (approve or reject) recorded in the audit trail. Only full refunds are accepted. A payment has at most one live refund. A refund cannot be completed while the provider reports something that contradicts the payment (for example a chargeback), which prevents paying the customer back twice.
 
-Impact:
-Operational inconsistency or accounting drift.
+Remaining limitation: the operator `actor` is self-declared because there is no authentication; there is no four-eyes rule (requester and approver must differ).
 
-Mitigation in this repo:
-Refund requests are blocked after reconciliation and require manual review.
+## Silent data alteration
 
-Remaining limitation:
-No formal approval workflow exists yet.
+Risk: the database silently rounds monetary values.
+
+Mitigation in this repo: amounts are validated to at most 2 decimals and 17 integer digits, and normalized to the stored scale without rounding.
 
 ## Audit log integrity
 
-Risk:
-Important changes happen without a trace.
+Risk: important changes happen without a trace, or the trace claims changes that were rolled back.
 
-Example attack:
-A transaction changes state and no audit event explains the reason.
+Mitigation in this repo: audit events are written in the same transaction as the change they describe, link to the payment, and carry the request's correlation id (`X-Request-Id`). Expected outcomes are returned rather than thrown, so their audit rows commit.
 
-Impact:
-Poor incident response and weak compliance posture.
+Remaining limitation: audit records live in the same database and are not tamper-evident.
 
-Mitigation in this repo:
-State changes, mismatches, review resolution, and idempotency replays are recorded as audit events.
+## Error disclosure
 
-Remaining limitation:
-Audit records are stored in the same database and are not immutable.
+Mitigation in this repo: unexpected errors return a generic 500 body with a request id; stack traces stay in the logs. Caller-supplied request ids are accepted only if they match a safe pattern, so they cannot inject into logs.

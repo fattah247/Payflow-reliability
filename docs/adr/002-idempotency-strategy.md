@@ -6,7 +6,7 @@ Payment creation requests can be retried by clients or proxies.
 
 ## Decision
 
-Persist an idempotency key on the payment intent and reject payload changes for reused keys.
+Persist an idempotency key on the payment intent, scoped per merchant, and reject payload changes for reused keys. A unique constraint on (merchant, key) decides concurrent retries; the loser replays the winner (see [009](009-concurrency-control.md)).
 
 ## Alternatives considered
 

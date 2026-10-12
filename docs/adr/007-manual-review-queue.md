@@ -1,5 +1,7 @@
 # 007 Manual Review Queue
 
+Status: amended by [011](011-review-decisions.md). Resolutions now carry decisions that act on payments and refunds.
+
 ## Context
 
 Not every mismatch should be auto-corrected by code.

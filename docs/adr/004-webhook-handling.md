@@ -1,5 +1,7 @@
 # 004 Webhook Handling
 
+Status: amended by [010](010-webhook-inbox-and-outcomes.md). Duplicate handling, signature failures, and transaction modeling changed there.
+
 ## Context
 
 Provider callbacks are retried, delayed, and occasionally contradictory.
