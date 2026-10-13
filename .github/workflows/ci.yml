@@ -11,10 +11,11 @@ on:
       - main
       - dev
 
+# Runners are pinned to an OS version so CI changes only when someone decides it should.
 jobs:
   test:
     name: test (${{ matrix.database }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     strategy:
@@ -59,7 +60,7 @@ jobs:
     # Runs the packaged app against PostgreSQL with its background workers and provider simulator,
     # then every scripted scenario and the walkthrough, each of which checks its own outcome.
     name: scenarios (live app on PostgreSQL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     services:
@@ -110,7 +111,7 @@ jobs:
 
   alert-rules:
     name: alert rules (promtool)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
