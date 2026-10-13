@@ -1,5 +1,7 @@
 # 002 Idempotency Strategy
 
+Status: extended. Every mutating operator call also accepts an optional `Idempotency-Key`; the first response is stored and replayed (see `IdempotencyFilter`). Refund creation now requires a key stored with the refund.
+
 ## Context
 
 Payment creation requests can be retried by clients or proxies.

@@ -15,3 +15,9 @@ Schema changes now need a migration file. Local databases created by the old Hib
 ## Consequences
 
 The schema is reviewable in one file, invariants live next to the data, and entity/schema drift fails fast at startup instead of in production.
+
+## Update: data migrations and database-specific safeguards
+
+- Portable SQL lives in `db/migration`. Backfills that need generated ids or hashes (audit chains, ledger journals from history, outbox commands for in-flight refunds) are Java migrations (`src/main/java/db/migration`), so H2 and PostgreSQL run the same code.
+- PostgreSQL-only protections (append-only triggers, the partial unique index that allows one unresolved review case per subject) live in `db/vendor/postgresql`, selected with Flyway's `{vendor}` placeholder.
+- `LegacyDataMigrationTest` builds a database at the previous version, fills it with representative rows (including edge states such as a reversal requested after capture), upgrades it, and checks that the books balance, audit chains verify and in-flight work is queued. It runs on both databases.

@@ -1,6 +1,6 @@
 # 004 Webhook Handling
 
-Status: amended by [010](010-webhook-inbox-and-outcomes.md). Duplicate handling, signature failures, and transaction modeling changed there.
+Status: amended by [010](010-webhook-inbox-and-outcomes.md) (duplicate handling, outcomes) and superseded for signatures by [014](014-signed-webhooks.md).
 
 ## Context
 
