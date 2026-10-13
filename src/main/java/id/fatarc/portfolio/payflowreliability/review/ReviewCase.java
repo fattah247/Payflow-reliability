@@ -25,7 +25,7 @@ public class ReviewCase {
     @Column(nullable = false)
     private ReviewStatus status;
 
-    /** What the case is about: a payment, a provider event or transaction, or a refund request. */
+    /** What the case is about: a payment, a provider event or transaction, a refund, or an outbox command. */
     @Column(nullable = false)
     private String referenceType;
 
@@ -40,6 +40,18 @@ public class ReviewCase {
 
     @Column(nullable = false)
     private String createdBy;
+
+    @Enumerated(EnumType.STRING)
+    private ReviewAction proposedAction;
+
+    private String proposedBy;
+
+    private Instant proposedAt;
+
+    @Column(length = 1000)
+    private String proposalNote;
+
+    private String approvedBy;
 
     private String resolvedBy;
 
@@ -70,20 +82,48 @@ public class ReviewCase {
         this.createdAt = Instant.now();
     }
 
-    public void resolve(String resolvedBy, String resolutionNote, ReviewAction action) {
+    /** First half of a two-person decision: nothing happens until a different operator approves. */
+    public void propose(ReviewAction action, String proposedBy, String note, Instant now) {
+        requireStatus(ReviewStatus.OPEN);
+        this.status = ReviewStatus.AWAITING_APPROVAL;
+        this.proposedAction = action;
+        this.proposedBy = proposedBy;
+        this.proposedAt = now;
+        this.proposalNote = Text.fit(note, 1000);
+    }
+
+    public void withdrawProposal() {
+        requireStatus(ReviewStatus.AWAITING_APPROVAL);
+        this.status = ReviewStatus.OPEN;
+        this.proposedAction = null;
+        this.proposedBy = null;
+        this.proposedAt = null;
+        this.proposalNote = null;
+    }
+
+    public void resolve(String resolvedBy, String resolutionNote, ReviewAction action, String approvedBy, Instant now) {
         if (status == ReviewStatus.RESOLVED) {
             throw new BusinessException(ErrorCode.REVIEW_CASE_ALREADY_RESOLVED,
                     "Review case " + id + " is already resolved.");
         }
         this.status = ReviewStatus.RESOLVED;
         this.resolvedBy = resolvedBy;
-        this.resolutionNote = resolutionNote;
+        this.resolutionNote = Text.fit(resolutionNote, 1000);
         this.resolutionAction = action;
-        this.resolvedAt = Instant.now();
+        this.approvedBy = approvedBy;
+        this.resolvedAt = now;
     }
 
-    public boolean isOpen() {
-        return status == ReviewStatus.OPEN;
+    public boolean isUnresolved() {
+        return status != ReviewStatus.RESOLVED;
+    }
+
+    private void requireStatus(ReviewStatus expected) {
+        if (status != expected) {
+            throw new BusinessException(status == ReviewStatus.RESOLVED ? ErrorCode.REVIEW_CASE_ALREADY_RESOLVED
+                    : ErrorCode.RESOLUTION_ACTION_NOT_APPLICABLE,
+                    "Review case " + id + " is " + status + ", expected " + expected + ".");
+        }
     }
 
     public UUID getId() { return id; }
@@ -94,6 +134,11 @@ public class ReviewCase {
     public UUID getPaymentIntentId() { return paymentIntentId; }
     public String getDetails() { return details; }
     public String getCreatedBy() { return createdBy; }
+    public ReviewAction getProposedAction() { return proposedAction; }
+    public String getProposedBy() { return proposedBy; }
+    public Instant getProposedAt() { return proposedAt; }
+    public String getProposalNote() { return proposalNote; }
+    public String getApprovedBy() { return approvedBy; }
     public String getResolvedBy() { return resolvedBy; }
     public Instant getResolvedAt() { return resolvedAt; }
     public String getResolutionNote() { return resolutionNote; }

@@ -1,197 +1,336 @@
 # Failure Scenarios
 
-Each scenario lists what happens, why it matters, the expected behavior, and the test that proves it. Tests commit like production (no test-wide transaction), and the suite also runs on PostgreSQL in CI.
+Each scenario lists what happens, why it matters, the expected behavior, and the test that proves it.
+Tests commit like production (no test-wide transaction), talk to the provider simulator over real HTTP,
+and the whole suite runs on H2 and on PostgreSQL in CI.
 
-## Duplicate payment request
+## Client and API
+
+### Duplicate payment request
 
 What happened: the client retries payment creation with the same `Idempotency-Key`.
 
-Why it matters: retries are normal on unreliable networks. Payments must not duplicate.
+Expected: the same intent is returned (HTTP 200, `Idempotent-Replayed: true`). Keys are scoped per
+merchant. A different payload with the same key gets 422 and the original is untouched. `50000` and
+`50000.00` are the same amount.
 
-Expected: the same intent is returned (HTTP 200, `Idempotent-Replayed: true`). Keys are scoped per merchant. A different payload with the same key is rejected with 422 and the original is untouched.
+Proof: `PaymentIntentIdempotencyTest`
 
-Proof: `PaymentIntentIdempotencyTest.shouldReturnSamePaymentIntentForSameIdempotencyKey`, `shouldRejectSameIdempotencyKeyWithDifferentPayload`, `shouldScopeIdempotencyKeysPerMerchant`
+### Concurrent retries of the same request
 
-## Concurrent retries of the same request
+Expected: exactly one intent; every caller receives it (8 threads).
 
-What happened: a client times out and retries while the first request is still running.
+Proof: `PaymentIntentIdempotencyTest.shouldCreateExactlyOneIntentWhenTheSameKeyArrivesConcurrently`
 
-Why it matters: both requests miss the "already exists" lookup. Before this was handled, the loser hit the unique constraint and got a 500.
+### Retried operator calls (settlement, review decisions, reconciliation)
 
-Expected: exactly one intent; every caller receives it.
+What happened: an operator tool times out and retries a settlement run.
 
-Proof: `PaymentIntentIdempotencyTest.shouldCreateExactlyOneIntentWhenTheSameKeyArrivesConcurrently` (8 threads)
+Expected: with an `Idempotency-Key`, the first response is stored and replayed with
+`Idempotent-Replayed: true`; a different request under the same key gets 422; concurrent retries execute
+once (the others get 409 retryable or the replay); a request rejected by validation leaves the key free;
+keys are scoped per caller and forgotten after 24 hours.
 
-## Provider redelivers an event
+Proof: `IdempotencyFilterTest`
 
-What happened: the provider sends the same event again because it did not trust delivery.
+### Unauthenticated, cross-merchant and over-privileged calls
 
-Why it matters: retries are routine provider behavior, not incidents.
+Expected: no key is 401; another merchant's payment or refund is 404; a merchant on an operator
+endpoint is 403; a revoked key stops working at once.
 
-Expected: 200 `DUPLICATE_IGNORED` with the original outcome; no second transaction; an audit event; **no review case**.
+Proof: `AuthorizationTest`, `MerchantOnboardingTest`
 
-Proof: `ProviderWebhookTest.shouldIgnoreAnExactRedeliveryWithoutOpeningAReviewCase`
+### Amounts with the wrong precision
 
-## Concurrent duplicate deliveries
+Expected: 400 for more decimals than the currency allows (`IDR 100.005`, `JPY 10.5`), unsupported
+currencies rejected, amounts returned at the currency's scale (`JPY 1500`, `IDR 125000.00`, `KWD 1.500`).
+Nothing is ever rounded.
 
-What happened: the provider's retry arrives while the first delivery is still processing.
+Proof: `ApiContractTest.shouldRejectAmountsMorePreciseThanTheCurrencyInsteadOfRoundingThem`,
+`shouldReturnAmountsAtTheCurrencyScaleFromEveryEndpoint`, `MoneyTest`
 
-Expected: applied exactly once; the others are duplicates.
+## Provider events
 
-Proof: `ProviderWebhookTest.shouldApplyAnEventDeliveredConcurrentlyExactlyOnce` (6 threads). Removing the payment row lock makes it fail.
+### Forged, tampered or replayed webhook
 
-## Same event id, different payload
+Expected: 401 and **nothing written** (no inbox row, no review case, no audit event) for a missing or
+wrong signature, a body changed after signing, or a timestamp more than 5 minutes away. A replay inside
+the window is a harmless duplicate. The previous secret keeps working during rotation.
 
-What happened: an event id is reused with different content.
+Proof: `WebhookSignatureTest`
 
-Why it matters: that is not a retry; something is wrong at the provider or in transit.
+### Provider redelivers an event, possibly concurrently
+
+Expected: 200 `DUPLICATE_IGNORED` with the original outcome; no second transaction, no second ledger
+journal, **no review case**. Six concurrent deliveries apply exactly once.
+
+Proof: `ProviderWebhookTest.shouldIgnoreAnExactRedeliveryWithoutOpeningAReviewCaseOrPostingTwice`,
+`shouldApplyAnEventDeliveredConcurrentlyExactlyOnce`, `ProviderSimulatorTest.shouldDeliverDuplicatedWebhooksThatAreAppliedOnce`
+
+### Same event id, different payload
 
 Expected: 202 `SENT_TO_REVIEW` with `PROVIDER_EVENT_CONFLICT`; state unchanged.
 
 Proof: `ProviderWebhookTest.shouldSendAReusedEventIdWithADifferentPayloadToReview`
 
-## Authorization then capture on one provider transaction
+### Authorization then capture; authorization after capture
 
-What happened: the provider sends `AUTHORIZED`, then `SUCCESS`, with the same provider transaction id.
+Expected: both steps of the two-step flow applied on one provider transaction; a late `AUTHORIZED` is
+`STALE_IGNORED`.
 
-Why it matters: this is the normal two-step card flow. The original implementation treated the capture as a duplicate, so the payment stayed `AUTHORIZED` and never settled.
+Proof: `ProviderWebhookTest.shouldCaptureAnAuthorizedPaymentWhenTheProviderReusesItsTransactionId`,
+`shouldIgnoreAnAuthorizationThatArrivesAfterCapture`
 
-Expected: both applied; one provider transaction row ending in `SUCCESS`; the payment is settleable.
+### Contradictory late event
 
-Proof: `ProviderWebhookTest.shouldCaptureAnAuthorizedPaymentWhenTheProviderReusesItsTransactionId`
+What happened: `FAILED` after `SUCCESS`, or a chargeback after payout.
 
-## Out-of-order authorization
+Why it matters: the provider and we disagree about whether money moved.
 
-What happened: `AUTHORIZED` arrives after `SUCCESS`.
+Expected: an in-flight payment is held (`MANUAL_REVIEW`, remembering where from) so it cannot settle and
+no refund is sent; a final outcome is left alone; a review case either way. Two conflicting events
+racing each other produce one transition and one case.
 
-Expected: 200 `STALE_IGNORED` (capture implies authorization); no review case.
+Proof: `ProviderWebhookTest.shouldHoldAPaymentWhenTheProviderContradictsIt`,
+`shouldLeaveAFinalOutcomeAloneWhenTheProviderContradictsIt`, `shouldHoldInsteadOfReversingWhenTheProviderAsksAfterPayout`,
+`shouldSerializeConflictingEventsForOnePayment`, `RefundTest.shouldHoldRefundsWhileTheProviderContradictsThePayment`
 
-Proof: `ProviderWebhookTest.shouldIgnoreAnAuthorizationThatArrivesAfterCapture`
+### Amount or currency mismatch
 
-## Contradictory late webhook
+Expected: hold and review, reasons reported separately; a final payment is never overwritten.
 
-What happened: a `FAILED` event arrives after the payment succeeded.
+Proof: `ProviderWebhookTest.shouldHoldAnInFlightPaymentForAmountMismatch`, `shouldReportCurrencyMismatchSeparately`,
+`shouldNeverOverwriteAFinalStateWhenALateEventMismatches`
 
-Why it matters: the provider and the local record disagree about whether money moved. Leaving the payment `SUCCESS` would let the next settlement pay the merchant while the question is open.
+### Event while a payment is on hold
 
-Expected: the payment is held in `MANUAL_REVIEW` (held from `SUCCESS`) with review case `INVALID_STATE_TRANSITION`, so settlement skips it. A payment whose outcome is already final (for example `FAILED`) is left alone and only the case is opened.
+Expected: 409 `PAYMENT_ON_HOLD` (retryable), not recorded; the provider keeps retrying and the
+redelivery is applied after an operator releases the payment.
 
-Proof: `ProviderWebhookTest.shouldHoldAPaymentWhenTheProviderContradictsIt`, `shouldLeaveAFinalOutcomeAloneWhenTheProviderContradictsIt`, `SettlementTest.shouldKeepAPaymentTheProviderContradictsOutOfSettlement`
+Proof: `ProviderWebhookTest.shouldDeferEventsWhileAPaymentIsOnHoldAndApplyTheRedeliveryAfterRelease`,
+`ProviderSimulatorTest.shouldRedeliverAWebhookDeferredByAHoldOnceTheHoldIsResolved`
 
-## Chargeback after settlement
+### Provider transaction claimed by two payments; event for an unknown payment
 
-What happened: the provider sends `REVERSAL_REQUIRED` for a payment already settled.
+Expected: review cases `PROVIDER_TRANSACTION_CONFLICT` / `PAYMENT_INTENT_NOT_FOUND`, persisted.
 
-Expected: the payment is held; the operator can choose `REQUIRE_REVERSAL`.
+Proof: `ProviderWebhookTest.shouldSendAProviderTransactionClaimedByTwoPaymentsToReview`,
+`shouldPersistTheReviewCaseForAnUnknownPaymentIntent`
 
-Proof: `ReviewWorkflowTest.shouldLetAnOperatorReverseAPaymentTheProviderChargedBackAfterSettlement`
+### Lost webhook
 
-## Contradiction on a refund-requested payment
+What happened: the customer paid, but the webhook never arrives.
 
-What happened: a refund is requested, then the provider reports a reversal (chargeback).
+Expected: after the threshold the status sweeper asks the provider and applies the answer through the
+same rules, recorded as a `POLL` event; the late webhook (if it ever arrives) is a duplicate; a
+disagreeing answer goes to review; payments the provider never heard of expire after 24 hours; if the
+provider cannot be asked, nothing changes and the next sweep tries again.
 
-Why it matters: completing the refund would return the money to the customer twice.
+Proof: `PaymentStatusSweeperTest`
 
-Expected: completing the refund fails with 409 `REFUND_NOT_COMPLETABLE` until an operator resolves the case.
+## Calling the provider
 
-Proof: `RefundTest.shouldNotCompleteARefundWhileTheProviderContradictsThePayment`
+### Provider outage
 
-## Webhook amount or currency mismatch
+Expected: the refund stays `REQUESTED`; the call is retried with exponential backoff and jitter under the
+same idempotency key and succeeds when the provider is back.
 
-What happened: the callback amount or currency differs from the local payment.
+Proof: `OutboxTest.shouldRetryAnOutageAndSucceedWithTheSameIdempotencyKey`
 
-Why it matters: tampering, provider bugs, or wrong local records.
+### Provider acted, then timed out
 
-Expected: an in-flight payment is held in `MANUAL_REVIEW` and remembers where it was held from. A payment with a final outcome is never overwritten; the case is opened without changing it. Amount and currency are reported as separate reasons.
+What happened: the provider refunded the customer but answered after our read timeout.
 
-Proof: `ProviderWebhookTest.shouldHoldAnInFlightPaymentForAmountMismatch`, `shouldReportCurrencyMismatchSeparately`, `shouldNeverOverwriteAFinalStateWhenALateEventMismatches`
+Why it matters: resending blindly can refund twice; treating it as failed loses track of money.
 
-## Event while a payment is on hold
+Expected: the outcome is unknown, not failed; the next attempt asks the provider about the idempotency
+key first and records the refund it finds. The customer is refunded exactly once.
 
-Expected: 409 `PAYMENT_ON_HOLD` (retryable), event not recorded. After an operator releases the payment, the provider's redelivery is applied.
+Proof: `OutboxTest.shouldLookUpAnUnknownOutcomeInsteadOfRefundingTwice`, scenario `provider-outage`
 
-Proof: `ProviderWebhookTest.shouldDeferEventsWhileAPaymentIsOnHoldAndApplyTheRedeliveryAfterRelease`
+### No answer after every retry
 
-## Provider transaction claimed by two payments
+Expected: the command needs review, the refund amount stays reserved, a `PROVIDER_OUTCOME_UNKNOWN` case
+offers `RETRY_PROVIDER_CALL`, and retrying completes it.
 
-Expected: review case `PROVIDER_TRANSACTION_CONFLICT`; the second payment is unchanged.
+Proof: `OutboxTest.shouldEscalateWhenRetriesRunOutAndRetryAfterAnOperatorDecides`
 
-Proof: `ProviderWebhookTest.shouldSendAProviderTransactionClaimedByTwoPaymentsToReview`
+### Two workers, or a worker that crashed
 
-## Webhook for an unknown payment
+Expected: a lease lets one worker hold a command; a dead worker's lease expires and another worker
+resends with the same key.
 
-Expected: 202 `SENT_TO_REVIEW`; the review case and inbox entry are **persisted**. The original implementation threw after opening the case, which rolled it back.
+Proof: `OutboxTest.shouldLetOnlyOneWorkerHoldACommand`, `shouldPickUpACommandWhoseWorkerDiedAfterTheLeaseExpires`
 
-Proof: `ProviderWebhookTest.shouldPersistTheReviewCaseForAnUnknownPaymentIntent`
+### Provider refuses
 
-## Forged webhook
+Expected: the refund `FAILED` with the provider's reason and a review case; nothing is booked; the
+amount is refundable again.
 
-Expected: 401; no state change, no review case, no inbox row, no audit row.
+Proof: `RefundTest.shouldFailTheRefundAndOpenACaseWhenTheProviderRefusesIt`
 
-Proof: `ProviderWebhookTest.shouldRejectAnInvalidSignatureWithoutWritingAnything`, `ApiContractTest.shouldReturn401ForAMissingOrForgedSignature`
+### The worker dies after the provider applied the call
 
-## Concurrent settlement runs
+What happened: the provider refunded the customer; our worker crashed before recording the answer.
 
-What happened: the settlement job is triggered twice at once.
+Why it matters: if the refund still looked unsent, it could be cancelled and requested again: refunded twice,
+booked once.
 
-Why it matters: the original implementation paid the merchant once per run.
+Expected: dispatch is committed before the call leaves, so the refund can no longer be cancelled; the next
+worker finds the refund by its key and records it once.
 
-Expected: one batch; the other runs get 409; each transaction appears in exactly one batch item (database constraint).
+Proof: `OutboxRecoveryTest.shouldNeverCancelARefundTheProviderMayAlreadyHave`
 
-Proof: `SettlementTest.shouldNeverSettleTheSameTransactionTwiceUnderConcurrentRuns` (4 threads, 20 transactions). Removing the version columns and the unique constraint reproduces four batches.
+### A lookup fails after an unknown outcome
 
-## A payment moves on before settlement
+Expected: a refused or failed lookup (for example during a key rotation) is an unknown outcome, never a
+refusal of the refund; the refund completes once.
 
-What happened: a refund is requested, or the provider requires a reversal, before the batch runs.
+Proof: `OutboxRecoveryTest.shouldNotTreatAFailedLookupAsARefusal`
 
-Why it matters: the original implementation crashed the whole batch with a 500, blocking settlement for every payment of that merchant.
+### A chargeback races a refund the provider already applied
 
-Expected: the payment is skipped; the rest settle.
+Expected: the reversal books what the provider says it returned (70 of 100, not 100); when the refund's
+confirmation arrives it is recorded too; refunded plus reversed equals the payment and the books balance.
+A refund never sent before the reversal fails instead of being sent.
 
-Proof: `SettlementTest.shouldSkipPaymentsThatMovedOnInsteadOfFailingTheWholeBatch`, and under concurrency `shouldStayConsistentWhenRefundsAndReversalsRaceASettlementRun`: refunds and reversal webhooks racing a run, with no errors, and every payment's settled flag matching batch membership.
+Proof: `OutboxRecoveryTest.shouldBookWhatTheProviderReversedWhileARefundIsStillOnItsWay`,
+`shouldNotSendARefundForAPaymentThatWasReversedFirst`
 
-## Merchant with several currencies
+### The provider refuses a reversal
 
-Expected: 422 listing the currencies; each currency settles in its own batch.
+Expected: the payment keeps waiting for a reversal and a case offers `RETRY_PROVIDER_CALL`, which sends a new
+command under a new idempotency key.
 
-Proof: `SettlementTest.shouldAskForACurrencyWhenAMerchantHasSeveralAndSettleEachSeparately`
+Proof: `OutboxRecoveryTest.shouldSendARefusedReversalAgainUnderANewKeyWhenAnOperatorDecides`
 
-## Provider report mismatch
+### An answer that cannot be recorded
 
-Expected: per-row verdict `MISMATCH` with each reason; one review case per reason; state unchanged. Importing the same report again does not duplicate open cases and reports `ALREADY_RECONCILED` for matched rows. A payment whose refund is only *requested* is expected to still look successful at the provider and is not flagged; a *completed* refund that the provider still reports as successful is.
+Expected: counted as an attempt, retried, then escalated for review; never retried forever, nothing booked.
 
-Proof: `ReconciliationTest.shouldCreateManualReviewForReconciliationMismatch`, `shouldBeSafeToImportTheSameReportTwice`, `shouldReuseOpenReviewCaseForRepeatedOperationalMismatch`, `shouldOnlyFlagAProviderSuccessForACompletedRefund`
+Proof: `OutboxRecoveryTest.shouldEscalateAProviderAnswerThatCannotBeRecordedInsteadOfRetryingForever`
 
-## Refund after reconciliation
+## Refunds
 
-Expected: 202 with the refund `PENDING_REVIEW` and a persisted review case. An operator approves it (payment becomes `REFUND_REQUESTED`, then `REFUNDED` once completed) or rejects it (payment stays `RECONCILED`). The original implementation threw and rolled back its own review case.
+### Partial refunds
 
-Proof: `RefundTest.shouldAcceptARefundAfterReconciliationAsPendingReviewAndPersistTheCase`, `ReviewWorkflowTest.shouldApproveARefundOnAReconciledPaymentAndLetItComplete`, `shouldRejectARefundOnAReconciledPaymentAndLeaveThePaymentAlone`
+Expected: allowed up to captured minus refunded minus refunds in progress; `REFUNDED` only when the whole
+amount is refunded; five concurrent requests can never exceed the capture.
 
-## Partial refund
+Proof: `RefundTest.shouldAllowPartialRefundsUpToTheCapturedAmount`, `shouldNeverRefundMoreThanCapturedUnderConcurrentRequests`
 
-Why it matters: the original implementation marked the whole payment `REFUNDED` for a refund of any amount.
+### Retried or concurrent refund requests
 
-Expected: 422; full refunds only.
-
-Proof: `RefundTest.shouldRejectAPartialRefundInsteadOfMarkingTheWholePaymentRefunded`
-
-## Retried or concurrent refund requests
-
-Expected: the existing refund is returned; five simultaneous requests create one refund.
+Expected: one refund per idempotency key; a reused key with a different amount is 422.
 
 Proof: `RefundTest.shouldReturnTheExistingRefundWhenTheRequestIsRetried`, `shouldCreateOneRefundWhenTheSameRequestArrivesConcurrently`
 
-## A held payment with nobody responsible
+### Cancelling a refund
 
-Expected: the last open case on a held payment cannot simply be acknowledged; it must release, fail, or reverse the payment. Two operators resolving the same case apply one decision.
+Expected: possible until the provider has it; cancelling twice is a no-op; afterwards 409.
 
-Proof: `ReviewWorkflowTest.shouldOfferHoldDecisionsAndNotAPlainAcknowledgeForAHeldPayment`, `shouldApplyOnlyOneDecisionWhenTwoOperatorsResolveConcurrently`
+Proof: `RefundTest.shouldCancelARefundThatHasNotBeenSent`, `shouldRefuseToCancelARefundTheProviderAlreadyHas`
 
-## Sub-cent amounts
+### Refund after reconciliation
 
-Why it matters: `100.005` used to be echoed to the client but stored as `100.01`.
+Expected: 202 `PENDING_REVIEW`; one operator proposes, a different operator approves; only then does the
+provider execute it.
 
-Expected: 400; amounts have at most 2 decimals and are returned at that scale everywhere.
+Proof: `ReviewWorkflowTest.shouldApproveARefundOnAReconciledPaymentWithTwoOperatorsAndLetTheProviderExecuteIt`
 
-Proof: `ApiContractTest.shouldRejectSubCentAmountsInsteadOfSilentlyRoundingThem`, `shouldReturnAmountsAtTheStoredScaleFromEveryEndpoint`
+## Settlement
+
+### Concurrent settlement runs
+
+Expected: one batch; the others get 409; each capture appears in exactly one batch item (database
+constraint); one payout journal.
+
+Proof: `SettlementTest.shouldNeverSettleTheSameCaptureTwiceUnderConcurrentRuns`
+
+### Refunds and reversals before or after payout
+
+Expected: deducted from the payout (before) or from the next one (after); a negative net is not paid and
+carries forward; the ledger owes nothing after each payout.
+
+Proof: `SettlementTest.shouldDeductRefundsCompletedBeforeThePayout`, `shouldDeductARefundMadeAfterPayoutFromTheNextBatch`,
+`shouldCarryANegativeNetForwardInsteadOfPayingIt`
+
+### A payment on hold or mid-reversal, or one that changes while the batch runs
+
+Expected: skipped, never failing the batch; under a race with refunds and reversal webhooks the books stay
+consistent.
+
+Proof: `SettlementTest.shouldWaitForPaymentsOnHoldOrMidReversalWithoutFailingTheBatch`,
+`shouldReCheckEachPaymentAfterLockingIt`, `shouldStayConsistentWhenRefundsAndReversalsRaceASettlementRun`
+
+### A chargeback under a new provider transaction id
+
+Why it matters: the chargeback creates a second transaction row for the payment; treated as a capture, it
+would be paid out a second time.
+
+Expected: a payment's capture is paid out once (database constraint); the invariant check also catches any
+payout that does not match what it settles.
+
+Proof: `SettlementTest.shouldPayACaptureOutOnceEvenWhenAChargebackArrivesUnderANewTransactionId`,
+`LedgerTest.shouldDetectAPayoutThatDoesNotMatchWhatItSettles`
+
+### Several currencies
+
+Expected: 422 listing them; each currency settles in its own batch.
+
+Proof: `SettlementTest.shouldAskForACurrencyWhenAMerchantHasSeveralAndSettleEachSeparately`
+
+## Reconciliation
+
+### Report rows that disagree
+
+Expected: a verdict per row (amount, currency, status, date, refunded amount); one review case per reason;
+state unchanged; re-importing reuses open cases.
+
+Proof: `ReconciliationTest`
+
+### Payouts missing from the report
+
+Expected: with a settlement date (and optionally a merchant), every payout recorded for that scope but not
+reported is flagged `MISSING_FROM_REPORT` and opens a case.
+
+Proof: `ReconciliationTest.shouldFlagPayoutsTheProviderDidNotReport`, `shouldAcceptAnEmptyReportForADayWithNoProviderActivity`
+
+## Operations and evidence
+
+### Books that disagree with operations
+
+Expected: the invariant check reports unbalanced journals and merchant balances that differ from
+captures minus refunds, reversals and payouts; the gauge drives a paging alert.
+
+Proof: `LedgerTest.shouldDetectBooksThatDisagreeWithOperations`, `shouldDetectAnUnbalancedJournalWrittenAroundTheService`
+
+### Edited or deleted history
+
+Expected: a modified, removed or re-hashed audit event breaks verification at that point; in PostgreSQL
+the change is refused outright without the maintenance opt-in.
+
+Proof: `AuditChainTest`
+
+### A held payment with nobody responsible; one operator moving money alone
+
+Expected: the last open case on a held payment that can decide the hold needs a decision (a refund case cannot
+release a payment, so it does not count); a refund cannot be approved while its payment is held; money-moving
+decisions need two operators; two operators resolving concurrently apply one decision.
+
+Proof: `ReviewWorkflowTest`
+
+### Alerts that silently stop working
+
+Expected: every metric used by an alert rule is exported; every alert has a runbook section; the ledger
+check and the gauge snapshot have dead man's switches.
+
+Proof: `AlertRulesTest`, `OperationsTest.shouldPublishGaugesForAlerting`
+
+### Upgrading a database with existing data
+
+Expected: legacy states mapped, capture times taken from the audit trail, ledger journals backfilled and
+balanced, audit chains built and verifiable, in-flight refunds and reversals queued for the provider, and
+duplicate open review cases (possible before) closed so the new uniqueness rule can be enforced.
+
+Proof: `LegacyDataMigrationTest` (on both databases)

@@ -1,9 +1,10 @@
 package id.fatarc.portfolio.payflowreliability.operations.dto;
 
+import id.fatarc.portfolio.payflowreliability.ledger.dto.InvariantReport;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
+import id.fatarc.portfolio.payflowreliability.settlement.SettlementService;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -11,27 +12,34 @@ import java.util.Map;
 /**
  * What needs attention right now, computed from live data on every call.
  *
- * @param paymentsByState     every payment state, including zero counts
- * @param awaitingSettlement  captured payments not yet in a batch, per merchant and currency; each line is one
- *                            {@code POST /api/settlements/batches} call away from settling
+ * @param paymentsByState    every payment state, including zero counts
+ * @param stuckPayments      payments waiting on the provider longer than the sweeper threshold
+ * @param awaitingSettlement net amounts the next payouts would pay, per merchant and currency
+ * @param ledger             the most recent books-versus-operations consistency check
  */
 public record OperationsSummary(
         Instant generatedAt,
         Map<PaymentState, Long> paymentsByState,
+        long stuckPayments,
         ReviewQueue reviewQueue,
         Refunds refunds,
-        List<SettlementBacklog> awaitingSettlement
+        ProviderCalls providerCalls,
+        List<SettlementService.Backlog> awaitingSettlement,
+        InvariantReport ledger
 ) {
     /**
-     * @param oldestOpenedAt creation time of the oldest open case, or null when the queue is empty
+     * @param oldestOpenedAt creation time of the oldest unresolved case, or null when the queue is empty
      */
-    public record ReviewQueue(long openCases, Map<ReviewReason, Long> openByReason, long paymentsOnHold,
-                              Instant oldestOpenedAt) {
+    public record ReviewQueue(long unresolved, long awaitingApproval, Map<ReviewReason, Long> unresolvedByReason,
+                              long paymentsOnHold, Instant oldestOpenedAt) {
     }
 
-    public record Refunds(long awaitingReview, long awaitingCompletion) {
+    public record Refunds(long awaitingReview, long inProgress, long failed) {
     }
 
-    public record SettlementBacklog(String merchantId, String currency, long transactionCount, BigDecimal totalAmount) {
+    /**
+     * @param needsReview calls whose outcome is unknown after all retries
+     */
+    public record ProviderCalls(long pending, long needsReview, long failed, Instant oldestPendingSince) {
     }
 }

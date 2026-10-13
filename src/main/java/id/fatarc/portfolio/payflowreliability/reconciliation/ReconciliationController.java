@@ -2,6 +2,7 @@ package id.fatarc.portfolio.payflowreliability.reconciliation;
 
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportRequest;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportResponse;
+import id.fatarc.portfolio.payflowreliability.security.Caller;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,7 +16,7 @@ public class ReconciliationController {
     }
 
     @PostMapping("/reports")
-    public ReconciliationReportResponse importReport(@Valid @RequestBody ReconciliationReportRequest request) {
-        return reconciliationService.importReport(request);
+    public ReconciliationReportResponse importReport(@Valid @RequestBody ReconciliationReportRequest request, Caller caller) {
+        return reconciliationService.importReport(request, caller);
     }
 }

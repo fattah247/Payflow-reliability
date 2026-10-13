@@ -8,6 +8,8 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -19,15 +21,18 @@ public class ReviewService {
 
     private final ReviewCaseRepository reviewCaseRepository;
     private final MeterRegistry meterRegistry;
+    private final Clock clock;
 
-    public ReviewService(ReviewCaseRepository reviewCaseRepository, MeterRegistry meterRegistry) {
+    public ReviewService(ReviewCaseRepository reviewCaseRepository, MeterRegistry meterRegistry, Clock clock) {
         this.reviewCaseRepository = reviewCaseRepository;
         this.meterRegistry = meterRegistry;
+        this.clock = clock;
     }
 
     /**
-     * Opens a case, or returns the open case that already exists for the same reason and
-     * subject, so a repeating problem shows up once in the queue instead of once per retry.
+     * Opens a case, or returns the unresolved case that already exists for the same reason and
+     * subject, so a repeating problem shows up once in the queue instead of once per retry. On
+     * PostgreSQL a partial unique index also enforces this under concurrent writers.
      */
     @Transactional
     public ReviewCase openCase(ReviewReason reason,
@@ -37,10 +42,10 @@ public class ReviewService {
                                String details,
                                String actor) {
         return reviewCaseRepository
-                .findFirstByStatusAndReasonAndReferenceTypeAndReferenceIdOrderByCreatedAtAsc(
-                        ReviewStatus.OPEN, reason, referenceType, referenceId)
+                .findFirstByStatusInAndReasonAndReferenceTypeAndReferenceIdOrderByCreatedAtAsc(
+                        ReviewStatus.UNRESOLVED, reason, referenceType, referenceId)
                 .orElseGet(() -> {
-                    ReviewCase created = reviewCaseRepository.save(
+                    ReviewCase created = reviewCaseRepository.saveAndFlush(
                             new ReviewCase(reason, referenceType, referenceId, paymentIntentId, details, actor));
                     meterRegistry.counter("payflow.review.cases.opened", "reason", reason.name()).increment();
                     log.info("Review case opened id={} reason={} reference={}:{} paymentIntentId={}",
@@ -49,12 +54,19 @@ public class ReviewService {
                 });
     }
 
-    /** Oldest first: the queue is worked in arrival order. Any filter may be null. */
+    /** Resolves every unresolved case about a subject that no longer needs a decision (for example a cancelled refund). */
+    @Transactional
+    public void closeForSubject(String referenceType, String referenceId, String actor, String note) {
+        reviewCaseRepository.findByStatusInAndReferenceTypeAndReferenceId(ReviewStatus.UNRESOLVED, referenceType, referenceId)
+                .forEach(reviewCase -> reviewCase.resolve(actor, note, ReviewAction.ACKNOWLEDGE, null, clock.instant()));
+    }
+
+    /** Oldest first: the queue is worked in arrival order. Null filters are ignored. */
     @Transactional(readOnly = true)
-    public List<ReviewCase> findCases(ReviewStatus status, ReviewReason reason, UUID paymentIntentId) {
+    public List<ReviewCase> findCases(Collection<ReviewStatus> statuses, ReviewReason reason, UUID paymentIntentId) {
         Specification<ReviewCase> filter = (root, query, cb) -> cb.conjunction();
-        if (status != null) {
-            filter = filter.and((root, query, cb) -> cb.equal(root.get("status"), status));
+        if (statuses != null) {
+            filter = filter.and((root, query, cb) -> root.get("status").in(statuses));
         }
         if (reason != null) {
             filter = filter.and((root, query, cb) -> cb.equal(root.get("reason"), reason));
@@ -65,10 +77,11 @@ public class ReviewService {
         return reviewCaseRepository.findAll(filter, Sort.by("createdAt", "id"));
     }
 
+    /** An unresolved case of this reason about this payment, if any. */
     @Transactional(readOnly = true)
     public Optional<ReviewCase> findOpenCase(UUID paymentIntentId, ReviewReason reason) {
-        return reviewCaseRepository.findFirstByStatusAndPaymentIntentIdAndReasonOrderByCreatedAtAsc(
-                ReviewStatus.OPEN, paymentIntentId, reason);
+        return reviewCaseRepository.findFirstByStatusInAndPaymentIntentIdAndReasonOrderByCreatedAtAsc(
+                ReviewStatus.UNRESOLVED, paymentIntentId, reason);
     }
 
     @Transactional(readOnly = true)

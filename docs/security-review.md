@@ -1,85 +1,121 @@
 # Security Review
 
-## Idempotency abuse
+Threats this service is designed against, how each is mitigated, and what remains. Each mitigation
+names the test that proves it.
 
-Risk: an attacker or buggy client replays payment creation requests.
+## Unauthenticated or impersonated callers
 
-Example attack: the same request is sent many times after a timeout, including concurrently.
+Risk: anyone can create payments for any merchant, read every payment, or approve refunds under any name.
 
-Impact: duplicate intents or duplicated downstream processing.
+Mitigation: every endpoint requires `Authorization: Bearer <key>` except health, the signed webhook and
+the provider simulator (which checks its own key). Merchant keys are random (256 bits), shown once,
+stored as SHA-256 hashes and revocable; operator keys are configured as hashes, so configuration holds
+no usable secret. The actor on every decision and audit event is the authenticated caller, not a field
+in the request body. ([ADR 013](adr/013-api-key-authentication.md); `AuthorizationTest`, `MerchantOnboardingTest`)
 
-Mitigation in this repo: same key and payload returns the existing intent; a changed payload is rejected with 422. A unique constraint on (merchant, key) decides concurrent retries. Keys are scoped per merchant, so one merchant cannot probe another's keys.
+Remaining limitation: no rate limiting or lockout on failed keys; a real deployment puts the service
+behind a gateway that does both. Operator keys are long-lived; an identity provider with short-lived
+tokens and MFA is the production answer.
 
-Remaining limitation: no rate limiting. `merchantId` comes from the request body because there is no authentication.
+## Cross-merchant access
 
-## Webhook spoofing
+Risk: merchant A reads or refunds merchant B's payment by guessing ids.
 
-Risk: an attacker sends a forged provider callback.
+Mitigation: the merchant is derived from the key, a mismatching `merchantId` in a body is refused (403),
+and another merchant's payment or refund returns the same 404 as a missing one, so ids cannot be probed.
+Idempotency keys are scoped per merchant (payments) and per caller (generic idempotency).
+(`AuthorizationTest.shouldHideOtherMerchantsPaymentsAndRefunds`)
 
-Impact: false success, state corruption.
+## Privilege escalation
 
-Mitigation in this repo: the shared signature is compared in constant time. A missing or wrong signature returns 401 **before anything is written**.
+Risk: a merchant key calls operator endpoints (settlement, review, ledger, metrics).
 
-Remaining limitation: the signature is a static shared secret (similar to some regional providers' callback tokens), not an HMAC over the body with a timestamp, so it does not prove body integrity or bound replay windows.
+Mitigation: URL rules allow merchants only payment creation, start, read, and their refunds; everything
+else needs the operator role. Operators cannot create payments. (`AuthorizationTest.shouldKeepOperationalEndpointsForOperators`)
+
+## Single-person fraud
+
+Risk: one operator approves a refund on a reconciled payment, or orders a reversal, alone.
+
+Mitigation: these decisions are proposed by one operator and applied only when a different operator
+approves; self-approval returns `403 FOUR_EYES_REQUIRED`. Both names are in the audit chain.
+([ADR 018](adr/018-maker-checker.md); `ReviewWorkflowTest.shouldNeedASecondOperatorToReverseAPaymentAfterPayout`)
+
+## Webhook spoofing and replay
+
+Risk: a forged provider callback marks a payment as paid; a captured callback is replayed later.
+
+Mitigation: HMAC-SHA256 over the timestamp and the exact raw body, verified before parsing, constant-time
+comparison, 5-minute window. Inside the window a replay is a harmless duplicate (the inbox). Several
+secrets can be active for rotation. ([ADR 014](adr/014-signed-webhooks.md); `WebhookSignatureTest`)
 
 ## Review-queue flooding
 
 Risk: unauthenticated requests create review cases or audit rows.
 
-Example attack: thousands of forged webhooks with random event ids.
+Mitigation: rejected webhooks persist nothing and are counted by reason (`payflow.webhook.rejected`, with
+an alert). Authenticated but repeated problems reuse the open case; in PostgreSQL a partial unique index
+allows only one unresolved case per (reason, subject) even under concurrent writers.
 
-Impact: operators drown in noise; storage grows.
+## Duplicate or concurrent money movement
 
-Mitigation in this repo: rejected signatures persist nothing; they are logged at WARN and counted in `payflow.webhook.rejected`. Authenticated but repeated problems reuse the open case for the same reason and subject.
+Risk: retried requests, double clicks, racing jobs or a provider timeout cause money to move twice.
 
-Remaining limitation: open-case deduplication is a lookup, not a database constraint.
+Mitigation:
+- payment and refund creation require an idempotency key stored with the record; every other mutating
+  call accepts one and replays the stored response;
+- per-payment row locks in one global order, optimistic versions, and unique constraints on every
+  "at most once" fact (inbox event, provider transaction, settlement item per capture/refund/reversal,
+  ledger journal per reference);
+- provider calls carry idempotency keys, and an unknown outcome is resolved by asking the provider
+  before resending ([ADR 015](adr/015-transactional-outbox.md); `OutboxTest`);
+- refunds count in-flight amounts against the refundable amount, so concurrent partial refunds can
+  never exceed the capture (`RefundTest.shouldNeverRefundMoreThanCapturedUnderConcurrentRequests`).
 
-## Replay and duplicate delivery
+## Invalid state transitions
 
-Risk: the same webhook is delivered more than once, possibly concurrently.
+Risk: late or contradictory events rewrite final states or let money move while facts are disputed.
 
-Impact: duplicate transaction rows or repeated state transitions.
-
-Mitigation in this repo: the webhook inbox has a unique event id, payment rows are locked while an event is processed, and payments carry an optimistic version. A reused event id with a different payload goes to review.
-
-Remaining limitation: no time window; very old valid events are still processed (and usually end as duplicates or contradictions).
-
-## Concurrent money movement
-
-Risk: two requests or jobs act on the same money at once.
-
-Example: two settlement runs; a double-clicked refund; two operators resolving the same case.
-
-Mitigation in this repo: per-payment row locks, optimistic versions, and database uniqueness (one settlement item per transaction, one inbox row per event, one provider transaction row per id). Losing requests get 409 and change nothing.
-
-## Invalid state transition
-
-Risk: late or contradictory events rewrite final states.
-
-Mitigation in this repo: the state machine rejects invalid transitions, holds an in-flight payment so it cannot settle while the provider disagrees, and opens a review case. Holds apply only to in-flight states, so a final outcome such as `REFUNDED` can never be overwritten by a suspicious event.
-
-## Refund abuse
-
-Risk: refunds on reconciled payments without additional control; refunds for more or less than was paid.
-
-Mitigation in this repo: refunds after reconciliation require an operator decision (approve or reject) recorded in the audit trail. Only full refunds are accepted. A payment has at most one live refund. A refund cannot be completed while the provider reports something that contradicts the payment (for example a chargeback), which prevents paying the customer back twice.
-
-Remaining limitation: the operator `actor` is self-declared because there is no authentication; there is no four-eyes rule (requester and approver must differ).
+Mitigation: the state machine rejects invalid transitions; a contradiction holds an in-flight payment so
+it cannot settle, and refunds are not sent to the provider while it is open. Final outcomes are never
+overwritten. (`ProviderWebhookTest`, `RefundTest.shouldHoldRefundsWhileTheProviderContradictsThePayment`)
 
 ## Silent data alteration
 
-Risk: the database silently rounds monetary values.
+Risk: rounding changes money; someone edits history in the database.
 
-Mitigation in this repo: amounts are validated to at most 2 decimals and 17 integer digits, and normalized to the stored scale without rounding.
+Mitigation: amounts follow the currency's minor unit and are never rounded (`RoundingMode.UNNECESSARY`).
+Audit events are hash-chained and verifiable; in PostgreSQL, audit and ledger tables refuse UPDATE,
+DELETE and TRUNCATE unless a maintenance transaction opts in. The ledger invariant check detects books
+that disagree with operational records. ([ADR 019](adr/019-tamper-evident-audit.md), [ADR 016](adr/016-double-entry-ledger.md);
+`AuditChainTest`, `LedgerTest`)
 
-## Audit log integrity
+Remaining limitation: a database superuser can rewrite a whole chain consistently; anchoring chain heads
+in external write-once storage closes that.
 
-Risk: important changes happen without a trace, or the trace claims changes that were rolled back.
+## A simulator left on in production
 
-Mitigation in this repo: audit events are written in the same transaction as the change they describe, link to the payment, and carry the request's correlation id (`X-Request-Id`). Expected outcomes are returned rather than thrown, so their audit rows commit.
+Risk: the provider simulator's key can create correctly signed provider events, so a deployment that keeps it
+on could be told any payment succeeded.
 
-Remaining limitation: audit records live in the same database and are not tamper-evident.
+Mitigation: the simulator is off unless enabled; the application refuses to start with the simulator next to a
+real provider, or with the local demo key or webhook secret against a real provider, and warns whenever the
+simulator is on. (`ProviderConfigurationGuardTest`)
+
+## Secrets
+
+- No secret is stored in plain text: merchant keys and operator keys are hashes; webhook secrets and the
+  provider API key come from the environment (`PAYFLOW_PROVIDER_WEBHOOK_SECRETS`, `PAYFLOW_PROVIDER_API_KEY`).
+- The defaults in `application.yml` are local demo values, documented as such, and a warning is logged
+  if the demo operator keys are configured.
+- Merchant onboarding responses (which contain a key) are never stored by the idempotency layer.
 
 ## Error disclosure
 
-Mitigation in this repo: unexpected errors return a generic 500 body with a request id; stack traces stay in the logs. Caller-supplied request ids are accepted only if they match a safe pattern, so they cannot inject into logs.
+Unexpected errors return a generic 500 body with a request id; stack traces stay in the logs. Caller-supplied
+request ids are accepted only if they match a safe pattern, so they cannot inject into logs.
+
+## Out of scope
+
+Card data and PCI-DSS scope (no card numbers are handled), TLS termination (done by the platform in
+front of the service), and network-level DoS protection.

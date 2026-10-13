@@ -36,7 +36,7 @@ public class PaymentTransaction {
     @Column(nullable = false)
     private ProviderStatus providerStatus;
 
-    @Column(nullable = false, precision = 19, scale = 2)
+    @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
     @Column(nullable = false, length = 3)
@@ -63,7 +63,7 @@ public class PaymentTransaction {
         this.merchantId = merchantId;
         this.providerTransactionId = providerTransactionId;
         this.providerStatus = providerStatus;
-        this.amount = Money.normalize(amount);
+        this.amount = Money.normalize(amount, currency);
         this.currency = currency;
         this.settled = false;
         this.createdAt = Instant.now();
@@ -89,7 +89,7 @@ public class PaymentTransaction {
     public String getMerchantId() { return merchantId; }
     public String getProviderTransactionId() { return providerTransactionId; }
     public ProviderStatus getProviderStatus() { return providerStatus; }
-    public BigDecimal getAmount() { return amount; }
+    public BigDecimal getAmount() { return Money.atScale(amount, currency); }
     public String getCurrency() { return currency; }
     public boolean isSettled() { return settled; }
     public LocalDate getSettledOn() { return settledOn; }

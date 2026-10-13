@@ -1,5 +1,7 @@
 # 005 Settlement Reconciliation
 
+Status: amended by [017](017-net-settlement.md) (net payouts) and by two-sided reconciliation (payouts missing from a report are flagged).
+
 ## Context
 
 Successful authorization is not the same as settlement, and settlement is not the same as reconciliation.

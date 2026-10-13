@@ -4,15 +4,24 @@ import id.fatarc.portfolio.payflowreliability.common.InvalidStateTransitionExcep
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Pure domain rules, no Spring context. */
 class PaymentIntentStateMachineTest {
+    private static final Instant NOW = Instant.parse("2026-10-01T10:00:00Z");
 
     private static PaymentIntent intent() {
         return new PaymentIntent("merchant", "ORDER-1", new BigDecimal("100.00"), "IDR", "key");
+    }
+
+    private static PaymentIntent captured() {
+        PaymentIntent intent = intent();
+        intent.start();
+        intent.succeed(NOW);
+        return intent;
     }
 
     @Test
@@ -20,17 +29,16 @@ class PaymentIntentStateMachineTest {
         PaymentIntent intent = intent();
         intent.start();
         intent.authorize();
-        intent.succeed();
+        intent.succeed(NOW);
         intent.settle();
         intent.reconcile();
         assertThat(intent.getState()).isEqualTo(PaymentState.RECONCILED);
+        assertThat(intent.getCapturedAt()).isEqualTo(NOW);
     }
 
     @Test
     void shouldRejectRegressionFromSuccessToFailed() {
-        PaymentIntent intent = intent();
-        intent.start();
-        intent.succeed();
+        PaymentIntent intent = captured();
         assertThatThrownBy(intent::fail)
                 .isInstanceOf(InvalidStateTransitionException.class)
                 .hasMessageContaining("Current state: SUCCESS");
@@ -64,9 +72,7 @@ class PaymentIntentStateMachineTest {
 
     @Test
     void shouldOnlyFailAHeldPaymentThatWasNeverCaptured() {
-        PaymentIntent captured = intent();
-        captured.start();
-        captured.succeed();
+        PaymentIntent captured = captured();
         captured.holdForReview();
         assertThat(captured.canFailFromReview()).isFalse();
         assertThatThrownBy(captured::failFromReview).isInstanceOf(InvalidStateTransitionException.class);
@@ -86,9 +92,7 @@ class PaymentIntentStateMachineTest {
         assertThat(pending.canReverseFromReview()).isFalse();
         assertThatThrownBy(pending::reverseFromReview).isInstanceOf(InvalidStateTransitionException.class);
 
-        PaymentIntent settled = intent();
-        settled.start();
-        settled.succeed();
+        PaymentIntent settled = captured();
         settled.settle();
         settled.holdForReview();
         settled.reverseFromReview();
@@ -96,15 +100,69 @@ class PaymentIntentStateMachineTest {
     }
 
     @Test
-    void shouldAllowARefundOnAReconciledPaymentOnlyThroughTheReviewedPath() {
+    void shouldReturnOnlyTheUnrefundedPartOnReversal() {
+        PaymentIntent intent = captured();
+        intent.recordRefund(new BigDecimal("30.00"));
+        intent.requireReversal();
+        intent.markReversed();
+
+        assertThat(intent.getState()).isEqualTo(PaymentState.REVERSED);
+        assertThat(intent.getReversedAmount()).isEqualByComparingTo("70.00");
+    }
+
+    @Test
+    void shouldReverseAnAuthorizationWithoutReturningMoney() {
         PaymentIntent intent = intent();
         intent.start();
-        intent.succeed();
-        intent.settle();
-        intent.reconcile();
+        intent.authorize();
+        intent.requireReversal();
+        intent.markReversed();
 
-        assertThatThrownBy(intent::requestRefund).isInstanceOf(InvalidStateTransitionException.class);
-        intent.requestReviewedRefund();
-        assertThat(intent.getState()).isEqualTo(PaymentState.REFUND_REQUESTED);
+        assertThat(intent.getReversedAmount()).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void shouldBecomeRefundedOnlyWhenTheWholeAmountIsRefunded() {
+        PaymentIntent intent = captured();
+        assertThat(intent.recordRefund(new BigDecimal("40.00"))).isNull();
+        assertThat(intent.getState()).isEqualTo(PaymentState.SUCCESS);
+        assertThat(intent.canRequestRefund()).isTrue();
+
+        assertThat(intent.recordRefund(new BigDecimal("60.00"))).isEqualTo(PaymentState.SUCCESS);
+        assertThat(intent.getState()).isEqualTo(PaymentState.REFUNDED);
+        assertThat(intent.canRequestRefund()).isFalse();
+    }
+
+    @Test
+    void shouldNeverRecordMoreRefundsThanThePaymentAmount() {
+        PaymentIntent intent = captured();
+        intent.recordRefund(new BigDecimal("80.00"));
+        assertThatThrownBy(() -> intent.recordRefund(new BigDecimal("20.01"))).isInstanceOf(IllegalStateException.class);
+        assertThat(intent.getRefundedAmount()).isEqualByComparingTo("80.00");
+    }
+
+    @Test
+    void shouldOnlyRefundCapturedPaymentsThatAreNotOnHold() {
+        PaymentIntent pending = intent();
+        pending.start();
+        assertThat(pending.canRequestRefund()).isFalse();
+
+        PaymentIntent held = captured();
+        held.holdForReview();
+        assertThat(held.canRequestRefund()).isFalse();
+
+        PaymentIntent reconciled = captured();
+        reconciled.settle();
+        reconciled.reconcile();
+        assertThat(reconciled.canRequestRefund()).isTrue();
+    }
+
+    @Test
+    void shouldStoreAmountsAtTheCurrencyPrecision() {
+        PaymentIntent yen = new PaymentIntent("merchant", "ORDER-JPY", new BigDecimal("1500"), "JPY", "key");
+        PaymentIntent dinar = new PaymentIntent("merchant", "ORDER-KWD", new BigDecimal("12.5"), "KWD", "key");
+
+        assertThat(yen.getAmount().scale()).isZero();
+        assertThat(dinar.getAmount()).isEqualTo(new BigDecimal("12.500"));
     }
 }

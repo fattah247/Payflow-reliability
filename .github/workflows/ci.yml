@@ -54,3 +54,69 @@ jobs:
           echo "SPRING_DATASOURCE_PASSWORD=payflow_reliability" >> "$GITHUB_ENV"
       - name: Test
         run: ./mvnw test
+
+  scenarios:
+    # Runs the packaged app against PostgreSQL with its background workers and provider simulator,
+    # then every scripted scenario and the walkthrough, each of which checks its own outcome.
+    name: scenarios (live app on PostgreSQL)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: payflow_reliability
+          POSTGRES_USER: payflow_reliability
+          POSTGRES_PASSWORD: payflow_reliability
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payflow_reliability -d payflow_reliability"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build
+        run: ./mvnw -q -DskipTests package
+      - name: Start the app
+        run: |
+          java -jar target/Payflow-reliability-0.1.0.jar > app.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            curl -sf http://localhost:8080/actuator/health/readiness > /dev/null && exit 0
+            sleep 2
+          done
+          echo "app did not become ready" >&2
+          exit 1
+      - name: Run every scenario
+        run: |
+          for scenario in idempotency duplicate-webhook amount-mismatch provider-outage lost-webhook \
+                          settlement reconciliation four-eyes security audit-trail; do
+            ./scripts/scenarios.sh "$scenario"
+          done
+      - name: Run the walkthrough
+        run: ./scripts/demo-readable.sh && ./scripts/demo.sh
+      - name: Show the app log
+        if: failure()
+        run: tail -n 300 app.log
+
+  alert-rules:
+    name: alert rules (promtool)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Check Prometheus rules
+        run: >-
+          docker run --rm -v "$PWD/ops/prometheus:/rules:ro" --entrypoint promtool prom/prometheus:v2.53.2
+          check rules /rules/alerts.yml

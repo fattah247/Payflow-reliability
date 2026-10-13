@@ -1,84 +1,42 @@
 #!/usr/bin/env bash
-# Quick end-to-end flow. Every run uses fresh ids, so it can be repeated without resetting the database.
+# Quick end-to-end flow against a running app: onboard a merchant, take a payment through the provider
+# simulator, refund part of it, pay the merchant out, reconcile, and show the books.
+# Every run uses fresh ids, so it can be repeated without resetting the database.
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-http://localhost:8080}"
-SIGNATURE="${SIGNATURE:-local-demo-signature}"
-RUN_ID="$(date +%Y%m%d%H%M%S)"
-MERCHANT_ID="merchant-demo-$RUN_ID"
-KEY="demo-key-$RUN_ID"
-PROVIDER_TX_ID="provider-tx-demo-$RUN_ID"
+source "$(dirname "$0")/lib/http.sh"
+require_tools
 
-need() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "missing dependency: $1" >&2
-    exit 1
-  }
-}
+RUN_ID="$(date +%Y%m%d%H%M%S)-$$"
 
-json_field() {
-  python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
-}
+onboard_merchant "merchant-demo-$RUN_ID"
+echo "merchant $MERCHANT_ID registered (API key ${MERCHANT_KEY:0:12}...)"
 
-need curl
-need python3
+create_payment "ORDER-$RUN_ID" 125000
+payment=$(pick id)
+echo "payment $payment created: HTTP $STATUS"
+create_payment "ORDER-$RUN_ID" 125000
+echo "same request retried: HTTP $STATUS, Idempotent-Replayed: $REPLAYED, id $(pick id)"
 
-create_body="{\"merchantId\": \"$MERCHANT_ID\", \"merchantReference\": \"ORDER-$RUN_ID\", \"amount\": 125000, \"currency\": \"IDR\"}"
+start_payment "$payment"
+customer_pays "$payment" 125000
+wait_for_state "$payment" SUCCESS
+echo "customer paid at the provider; signed webhook applied: $(pick state)"
 
-echo "creating payment intent"
-payment_intent_id=$(curl -sS -X POST "$BASE_URL/api/payment-intents" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: $KEY" -d "$create_body" | json_field id)
-echo "payment_intent_id=$payment_intent_id"
+as_merchant request POST "/api/refunds/payment-intents/$payment" \
+  '{"amount": 25000, "reason": "Customer returned one item"}' "Idempotency-Key: refund-$RUN_ID"
+refund=$(pick id)
+wait_for_refund "$refund" COMPLETED
+echo "partial refund executed by the provider: $(pick status) $(pick amount)"
 
-echo "replaying same payment intent request"
-replay_id=$(curl -sS -X POST "$BASE_URL/api/payment-intents" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: $KEY" -d "$create_body" | json_field id)
-echo "replay_id=$replay_id"
+as_ops request POST "/api/settlements/batches?merchantId=$MERCHANT_ID" ""
+echo "settlement batch: captures $(pick captureAmount) - refunds $(pick deductionAmount) = net $(pick totalAmount)"
 
-echo "starting payment"
-curl -sS -X POST "$BASE_URL/api/payment-intents/$payment_intent_id/start" >/dev/null
+tx=$(provider_tx "$payment")
+as_ops request POST /api/reconciliation/reports "{\"rows\": [{\"providerTransactionId\": \"$tx\", \"amount\": 125000,
+  \"currency\": \"IDR\", \"providerStatus\": \"SUCCESS\", \"settlementDate\": \"$(date +%F)\", \"refundedAmount\": 25000}]}"
+echo "reconciliation: $(pick rows.0.outcome)"
 
-webhook_body="{
-  \"providerEventId\": \"evt-demo-$RUN_ID\",
-  \"providerTransactionId\": \"$PROVIDER_TX_ID\",
-  \"paymentIntentId\": \"$payment_intent_id\",
-  \"status\": \"SUCCESS\",
-  \"amount\": 125000,
-  \"currency\": \"IDR\"
-}"
-
-echo "sending success webhook"
-curl -sS -X POST "$BASE_URL/fake-provider/webhook" \
-  -H 'Content-Type: application/json' -H "X-Provider-Signature: $SIGNATURE" -d "$webhook_body" | json_field outcome
-
-echo "redelivering the same webhook (provider retry)"
-curl -sS -X POST "$BASE_URL/fake-provider/webhook" \
-  -H 'Content-Type: application/json' -H "X-Provider-Signature: $SIGNATURE" -d "$webhook_body" | json_field outcome
-
-echo "creating settlement batch"
-batch_id=$(curl -sS -X POST "$BASE_URL/api/settlements/batches?merchantId=$MERCHANT_ID" | json_field id)
-echo "batch_id=$batch_id"
-
-echo "sending reconciliation mismatch"
-curl -sS -X POST "$BASE_URL/api/reconciliation/reports" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"rows\": [
-      {
-        \"providerTransactionId\": \"$PROVIDER_TX_ID\",
-        \"amount\": 124000,
-        \"currency\": \"IDR\",
-        \"providerStatus\": \"SUCCESS\",
-        \"settlementDate\": \"2026-01-01\"
-      }
-    ]
-  }"
-echo
-
-echo "open review cases for this payment"
-curl -sS "$BASE_URL/api/review-cases?paymentIntentId=$payment_intent_id"
-echo
-
-echo "audit trail"
-curl -sS "$BASE_URL/api/audit-events?paymentIntentId=$payment_intent_id"
-echo
+echo "still owed to the merchant: $(owed "$MERCHANT_ID") IDR"
+as_ops request GET "/api/audit-events/verify?paymentIntentId=$payment" ""
+echo "audit chain: $(pick events) events, valid=$(pick valid)"

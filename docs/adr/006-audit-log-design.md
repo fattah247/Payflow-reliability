@@ -1,5 +1,7 @@
 # 006 Audit Log Design
 
+Status: amended by [019](019-tamper-evident-audit.md) (hash chains, append-only storage).
+
 ## Context
 
 Payment systems need an explanation for every important state change and review action.

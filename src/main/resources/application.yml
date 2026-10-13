@@ -6,8 +6,9 @@ spring:
     username: ${PAYFLOW_DB_USERNAME:payflow_reliability}
     password: ${PAYFLOW_DB_PASSWORD:payflow_reliability}
   flyway:
-    # The schema lives in src/main/resources/db/migration; Hibernate only checks it matches the entities.
-    locations: classpath:db/migration
+    # Portable migrations live in db/migration (SQL) and db.migration (Java backfills);
+    # database-specific safeguards (append-only triggers, partial unique indexes) in db/vendor/<vendor>.
+    locations: classpath:db/migration,classpath:db/vendor/{vendor}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -18,10 +19,22 @@ spring:
   jackson:
     serialization:
       write-dates-as-timestamps: false
+  lifecycle:
+    # In-flight requests and scheduled jobs finish before the process exits.
+    timeout-per-shutdown-phase: 30s
+  task:
+    scheduling:
+      shutdown:
+        await-termination: true
+        await-termination-period: 30s
+
+server:
+  shutdown: graceful
 
 logging:
   pattern:
-    # Every log line carries the request's correlation id (also returned as X-Request-Id and stored on audit events).
+    # Every log line carries the request's correlation id (also returned as X-Request-Id and stored on
+    # audit events); Spring adds the trace and span ids, so a request can be followed into provider calls.
     level: "%5p [requestId=%X{requestId:-}]"
   level:
     # Hibernate logs every constraint violation at ERROR, including expected, handled concurrency conflicts.
@@ -32,8 +45,66 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  tracing:
+    sampling:
+      probability: ${PAYFLOW_TRACE_SAMPLING:1.0}
 
-payment-lab:
+payflow:
+  security:
+    # Operators authenticate with API keys whose SHA-256 is listed here; the keys themselves are never stored.
+    # Local defaults (pf_o_local_ops-ana, pf_o_local_ops-budi) exist only for the demo; replace them in any real deployment.
+    operators:
+      - name: ops-ana
+        key-sha256: ${PAYFLOW_OPERATOR_ANA_KEY_SHA256:14b94d5ffd0accf82a7426adb64b93ac943f850816a0358c8407f3521e9c55f7}
+      - name: ops-budi
+        key-sha256: ${PAYFLOW_OPERATOR_BUDI_KEY_SHA256:ca07262ffd60bdc03424272ee13be4ed59d8614c454b4e74716459d4c175d90d}
   provider:
-    demo-signature: ${PAYFLOW_PROVIDER_SIGNATURE:local-demo-signature}
+    # Empty base URL means the provider simulator served by this application.
+    base-url: ${PAYFLOW_PROVIDER_BASE_URL:}
+    api-key: ${PAYFLOW_PROVIDER_API_KEY:sim_local_provider_key}
+    # First secret is current; append the previous one during rotation so in-flight webhooks still verify.
+    webhook-secrets: ${PAYFLOW_PROVIDER_WEBHOOK_SECRETS:whsec_local_payflow}
+    signature-tolerance: 5m
+    connect-timeout: 2s
+    read-timeout: 5s
+  provider-sim:
+    enabled: ${PAYFLOW_PROVIDER_SIM_ENABLED:true}
+    api-key: ${PAYFLOW_PROVIDER_API_KEY:sim_local_provider_key}
+    webhook-secret: ${PAYFLOW_PROVIDER_SIM_WEBHOOK_SECRET:whsec_local_payflow}
+    webhook-url: ${PAYFLOW_PROVIDER_SIM_WEBHOOK_URL:}
+    max-delivery-attempts: 8
+    delivery-base-backoff: 2s
+    delivery-max-backoff: 5m
+    fault-delay: 8s
+    dispatch-interval: 1s
+  workers:
+    enabled: ${PAYFLOW_WORKERS_ENABLED:true}
+  outbox:
+    poll-interval: 1s
+    batch-size: 20
+    max-attempts: 8
+    lease: 30s
+    base-backoff: 2s
+    max-backoff: 5m
+    blocked-retry: 5m
+  sweeper:
+    interval: 5m
+    initial-delay: 1m
+    stuck-after: 15m
+    recheck-interval: 15m
+    pending-expiry: 24h
+    created-expiry: 24h
+    batch-size: 50
+  ledger:
+    invariant-check-interval: 5m
+  idempotency:
+    retention: 24h
+    stale-after: 60s
+    cleanup-interval: 1h
+  metrics:
+    refresh-interval: 30s

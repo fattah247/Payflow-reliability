@@ -9,12 +9,14 @@ import java.util.UUID;
 /**
  * @param mismatchCount   number of individual discrepancies found (a row can have several)
  * @param reconciledCount payments moved from SETTLED to RECONCILED by this import
- * @param rows            one result per report row, in report order
+ * @param missingCount    payouts recorded for the settlement date but absent from the report
+ * @param rows            one result per report row, in report order, then one per missing payout
  */
 public record ReconciliationReportResponse(
         int checkedRows,
         int mismatchCount,
         int reconciledCount,
+        int missingCount,
         List<RowResult> rows
 ) {
     public enum RowOutcome {
@@ -29,11 +31,16 @@ public record ReconciliationReportResponse(
         /** No local transaction has this provider reference. */
         NOT_FOUND_LOCALLY,
         /** The provider reference appeared earlier in the same report. */
-        DUPLICATE_ROW
+        DUPLICATE_ROW,
+        /** We paid this out on the settlement date, but the provider's report for that date does not list it. */
+        MISSING_FROM_REPORT
     }
 
+    /**
+     * @param rowNumber position in the report; null for MISSING_FROM_REPORT results
+     */
     public record RowResult(
-            int rowNumber,
+            Integer rowNumber,
             String providerTransactionId,
             RowOutcome outcome,
             UUID paymentIntentId,

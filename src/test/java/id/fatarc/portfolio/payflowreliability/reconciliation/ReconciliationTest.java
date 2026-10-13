@@ -7,12 +7,9 @@ import id.fatarc.portfolio.payflowreliability.payment.ProviderStatus;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportRequest;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportResponse;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportResponse.RowOutcome;
-import id.fatarc.portfolio.payflowreliability.refund.RefundService;
-import id.fatarc.portfolio.payflowreliability.refund.dto.CreateRefundRequest;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
 import id.fatarc.portfolio.payflowreliability.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -20,12 +17,11 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/** Two-sided: every reported row gets a verdict, and payouts the provider did not report are flagged. */
 class ReconciliationTest extends IntegrationTest {
-    @Autowired
-    private RefundService refundService;
 
     private ReconciliationReportResponse importRows(ReconciliationReportRequest.Row... rows) {
-        return reconciliationService.importReport(new ReconciliationReportRequest(List.of(rows)));
+        return reconciliationService.importReport(new ReconciliationReportRequest(List.of(rows)), OPS_ANA);
     }
 
     private static ReconciliationReportRequest.Row row(String providerTransactionId, String amount, LocalDate settlementDate) {
@@ -33,22 +29,23 @@ class ReconciliationTest extends IntegrationTest {
                 ProviderStatus.SUCCESS, settlementDate);
     }
 
-    private PaymentTransaction transactionOf(PaymentIntent intent) {
-        return paymentTransactionRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId()).getFirst();
+    private ReconciliationReportRequest.Row rowFor(PaymentIntent intent, String amount) {
+        PaymentTransaction transaction = transactionOf(intent);
+        return row(transaction.getProviderTransactionId(), amount, transaction.getSettledOn());
     }
 
     @Test
     void shouldReconcileMatchingSettledTransaction() {
         PaymentIntent intent = settledIntent("ORDER-3001", "64000");
-        PaymentTransaction transaction = transactionOf(intent);
 
-        ReconciliationReportResponse result = importRows(row(transaction.getProviderTransactionId(), "64000", transaction.getSettledOn()));
+        ReconciliationReportResponse result = importRows(rowFor(intent, "64000"));
 
         assertThat(result.mismatchCount()).isZero();
         assertThat(result.reconciledCount()).isEqualTo(1);
         assertThat(result.rows()).singleElement().extracting(ReconciliationReportResponse.RowResult::outcome)
                 .isEqualTo(RowOutcome.RECONCILED);
         assertThat(stateOf(intent)).isEqualTo(PaymentState.RECONCILED);
+        assertThat(auditFor(intent)).last().satisfies(event -> assertThat(event.getActor()).isEqualTo("operator:ops-ana"));
     }
 
     @Test
@@ -57,7 +54,7 @@ class ReconciliationTest extends IntegrationTest {
         PaymentTransaction transaction = transactionOf(intent);
 
         ReconciliationReportResponse result = importRows(
-                row(transaction.getProviderTransactionId(), "87000", LocalDate.now().minusDays(1)));
+                row(transaction.getProviderTransactionId(), "87000", transaction.getSettledOn().minusDays(1)));
 
         assertThat(result.mismatchCount()).isEqualTo(2);
         assertThat(result.rows()).singleElement().satisfies(row -> {
@@ -71,10 +68,58 @@ class ReconciliationTest extends IntegrationTest {
     }
 
     @Test
+    void shouldFlagPayoutsTheProviderDidNotReport() {
+        PaymentIntent reported = paidIntent("ORDER-3003", "1000");
+        PaymentIntent unreported = paidIntent("ORDER-3004", "2000");
+        settle(MERCHANT_A);
+        LocalDate payoutDate = transactionOf(reported).getSettledOn();
+
+        ReconciliationReportResponse result = reconciliationService.importReport(
+                new ReconciliationReportRequest(payoutDate, List.of(rowFor(reported, "1000"))), OPS_ANA);
+
+        assertThat(result.reconciledCount()).isEqualTo(1);
+        assertThat(result.missingCount()).isEqualTo(1);
+        assertThat(result.rows()).filteredOn(row -> row.outcome() == RowOutcome.MISSING_FROM_REPORT).singleElement()
+                .satisfies(row -> {
+                    assertThat(row.rowNumber()).isNull();
+                    assertThat(row.paymentIntentId()).isEqualTo(unreported.getId());
+                });
+        assertThat(openReviewReasons()).containsExactly(ReviewReason.MISSING_FROM_PROVIDER_REPORT);
+        assertThat(stateOf(unreported)).isEqualTo(PaymentState.SETTLED);
+    }
+
+    @Test
+    void shouldOnlyExpectTheReportedMerchantsPayoutsWhenScopedToOneMerchant() {
+        PaymentIntent ours = paidIntent("ORDER-3012", "1000");
+        paidIntent(MERCHANT_B, "ORDER-3013", "2000", "IDR");
+        settle(MERCHANT_A);
+        settle(MERCHANT_B);
+        LocalDate payoutDate = transactionOf(ours).getSettledOn();
+
+        ReconciliationReportResponse scoped = reconciliationService.importReport(
+                new ReconciliationReportRequest(payoutDate, MERCHANT_A, List.of(rowFor(ours, "1000"))), OPS_ANA);
+        ReconciliationReportResponse platformWide = reconciliationService.importReport(
+                new ReconciliationReportRequest(payoutDate, List.of(rowFor(ours, "1000"))), OPS_ANA);
+
+        assertThat(scoped.missingCount()).isZero();
+        assertThat(platformWide.missingCount()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldAcceptAnEmptyReportForADayWithNoProviderActivity() {
+        PaymentIntent paid = settledIntent("ORDER-3005", "1000");
+
+        ReconciliationReportResponse result = reconciliationService.importReport(
+                new ReconciliationReportRequest(transactionOf(paid).getSettledOn(), List.of()), OPS_ANA);
+
+        assertThat(result.checkedRows()).isZero();
+        assertThat(result.missingCount()).isEqualTo(1);
+    }
+
+    @Test
     void shouldBeSafeToImportTheSameReportTwice() {
-        PaymentIntent matched = settledIntent("ORDER-3003", "1000");
-        PaymentTransaction matchedTx = transactionOf(matched);
-        ReconciliationReportRequest.Row good = row(matchedTx.getProviderTransactionId(), "1000", matchedTx.getSettledOn());
+        PaymentIntent matched = settledIntent("ORDER-3006", "1000");
+        ReconciliationReportRequest.Row good = rowFor(matched, "1000");
         ReconciliationReportRequest.Row unknown = row("provider-tx-unknown", "5000", null);
 
         importRows(good, unknown);
@@ -88,7 +133,7 @@ class ReconciliationTest extends IntegrationTest {
 
     @Test
     void shouldReportAMatchedRowWhosePaymentIsNotSettledYet() {
-        PaymentIntent captured = capturedIntent("ORDER-3004", "2500");
+        PaymentIntent captured = capturedIntent("ORDER-3007", "2500");
 
         ReconciliationReportResponse result = importRows(row(transactionOf(captured).getProviderTransactionId(), "2500", null));
 
@@ -100,20 +145,33 @@ class ReconciliationTest extends IntegrationTest {
     }
 
     @Test
-    void shouldOnlyFlagAProviderSuccessForACompletedRefund() {
-        PaymentIntent requested = settledIntent("ORDER-3007", "4000");
-        refundService.requestRefund(requested.getId(), new CreateRefundRequest(new BigDecimal("4000"), "return"));
-        PaymentTransaction requestedTx = transactionOf(requested);
+    void shouldCompareRefundedAmountsWhenTheProviderReportsThem() {
+        PaymentIntent intent = settledIntent("ORDER-3008", "4000");
+        requestRefund(reload(intent), "1500", "refund-3008");
+        drainOutbox();
+        PaymentTransaction transaction = transactionOf(intent);
 
-        ReconciliationReportResponse beforeCompletion = importRows(
-                row(requestedTx.getProviderTransactionId(), "4000", requestedTx.getSettledOn()));
-        assertThat(beforeCompletion.rows()).singleElement()
-                .extracting(ReconciliationReportResponse.RowResult::outcome).isEqualTo(RowOutcome.MATCHED_NO_ACTION);
+        ReconciliationReportResponse wrong = importRows(new ReconciliationReportRequest.Row(transaction.getProviderTransactionId(),
+                new BigDecimal("4000"), "IDR", ProviderStatus.SUCCESS, transaction.getSettledOn(), new BigDecimal("1000")));
+        assertThat(wrong.rows()).singleElement().satisfies(row ->
+                assertThat(row.mismatches()).containsExactly(ReviewReason.REFUND_AMOUNT_MISMATCH));
 
-        refundService.completeRefund(refundService.refundsForPayment(requested.getId()).getFirst().getId());
-        ReconciliationReportResponse afterCompletion = importRows(
-                row(requestedTx.getProviderTransactionId(), "4000", requestedTx.getSettledOn()));
-        assertThat(afterCompletion.rows()).singleElement().satisfies(row -> {
+        ReconciliationReportResponse right = importRows(new ReconciliationReportRequest.Row(transaction.getProviderTransactionId(),
+                new BigDecimal("4000"), "IDR", ProviderStatus.SUCCESS, transaction.getSettledOn(), new BigDecimal("1500")));
+        assertThat(right.rows()).singleElement().extracting(ReconciliationReportResponse.RowResult::outcome)
+                .isEqualTo(RowOutcome.RECONCILED);
+    }
+
+    @Test
+    void shouldFlagAProviderSuccessForAFullyRefundedPayment() {
+        PaymentIntent intent = settledIntent("ORDER-3009", "4000");
+        requestRefund(reload(intent), "4000", "refund-3009");
+        drainOutbox();
+        assertThat(stateOf(intent)).isEqualTo(PaymentState.REFUNDED);
+
+        ReconciliationReportResponse result = importRows(rowFor(intent, "4000"));
+
+        assertThat(result.rows()).singleElement().satisfies(row -> {
             assertThat(row.outcome()).isEqualTo(RowOutcome.MISMATCH);
             assertThat(row.mismatches()).containsExactly(ReviewReason.STATUS_MISMATCH);
         });
@@ -121,9 +179,8 @@ class ReconciliationTest extends IntegrationTest {
 
     @Test
     void shouldFlagADuplicateRowInTheSameReport() {
-        PaymentIntent intent = settledIntent("ORDER-3005", "3000");
-        PaymentTransaction transaction = transactionOf(intent);
-        ReconciliationReportRequest.Row row = row(transaction.getProviderTransactionId(), "3000", transaction.getSettledOn());
+        PaymentIntent intent = settledIntent("ORDER-3010", "3000");
+        ReconciliationReportRequest.Row row = rowFor(intent, "3000");
 
         ReconciliationReportResponse result = importRows(row, row);
 
@@ -134,7 +191,7 @@ class ReconciliationTest extends IntegrationTest {
 
     @Test
     void shouldReuseOpenReviewCaseForRepeatedOperationalMismatch() {
-        PaymentIntent intent = settledIntent("ORDER-3006", "48000");
+        PaymentIntent intent = settledIntent("ORDER-3011", "48000");
         ReconciliationReportRequest.Row wrong = row(transactionOf(intent).getProviderTransactionId(), "47000", null);
 
         importRows(wrong);

@@ -11,9 +11,11 @@ import java.util.UUID;
 @RequestMapping("/api/audit-events")
 public class AuditController {
     private final AuditService auditService;
+    private final AuditChainVerifier chainVerifier;
 
-    public AuditController(AuditService auditService) {
+    public AuditController(AuditService auditService, AuditChainVerifier chainVerifier) {
         this.auditService = auditService;
+        this.chainVerifier = chainVerifier;
     }
 
     /**
@@ -32,6 +34,16 @@ public class AuditController {
                     "Provide paymentIntentId, or both aggregateType and aggregateId.");
         }
         return auditService.history(aggregateType, aggregateId);
+    }
+
+    /** Recomputes a hash chain: a payment's ({@code paymentIntentId}) or any other ({@code chainKey}). */
+    @GetMapping("/verify")
+    public AuditChainVerifier.Verification verify(@RequestParam(required = false) UUID paymentIntentId,
+                                                  @RequestParam(required = false) String chainKey) {
+        if (paymentIntentId == null && isBlank(chainKey)) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED, "Provide paymentIntentId or chainKey.");
+        }
+        return chainVerifier.verify(paymentIntentId != null ? AuditHash.chainKey(paymentIntentId, null, null) : chainKey);
     }
 
     private static boolean isBlank(String value) {

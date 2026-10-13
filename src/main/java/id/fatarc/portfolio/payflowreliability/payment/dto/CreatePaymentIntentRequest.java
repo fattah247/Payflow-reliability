@@ -1,7 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.payment.dto;
 
-import jakarta.validation.constraints.DecimalMin;
-import jakarta.validation.constraints.Digits;
+import id.fatarc.portfolio.payflowreliability.common.MonetaryAmount;
+import id.fatarc.portfolio.payflowreliability.common.ValidMoney;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -9,10 +9,14 @@ import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
 
+/**
+ * @param merchantId optional: the merchant is taken from the API key; if sent, it must match
+ */
+@ValidMoney
 public record CreatePaymentIntentRequest(
-        @NotBlank @Size(max = 100) String merchantId,
+        @Size(max = 100) String merchantId,
         @NotBlank @Size(max = 100) String merchantReference,
-        @NotNull @Digits(integer = 17, fraction = 2, message = "must have at most 17 integer digits and 2 decimal places") @DecimalMin(value = "0.01") BigDecimal amount,
+        @NotNull BigDecimal amount,
         @NotBlank @Pattern(regexp = "[A-Z]{3}", message = "must be a 3-letter uppercase ISO currency code") String currency
-) {
+) implements MonetaryAmount {
 }

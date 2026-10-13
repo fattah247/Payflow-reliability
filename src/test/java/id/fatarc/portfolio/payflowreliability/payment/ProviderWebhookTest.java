@@ -1,40 +1,44 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
-import id.fatarc.portfolio.payflowreliability.common.BusinessException;
-import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
-import id.fatarc.portfolio.payflowreliability.payment.dto.ProviderWebhookRequest;
+import id.fatarc.portfolio.payflowreliability.ledger.JournalType;
+import id.fatarc.portfolio.payflowreliability.outbox.CommandType;
 import id.fatarc.portfolio.payflowreliability.review.ReviewAction;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
 import id.fatarc.portfolio.payflowreliability.review.dto.ResolveReviewCaseRequest;
 import id.fatarc.portfolio.payflowreliability.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/** The rules every provider event goes through (signature verification is covered in WebhookSignatureTest). */
 class ProviderWebhookTest extends IntegrationTest {
 
     @Test
-    void shouldApplySuccessAndRecordTheProviderTransactionAndEvent() {
+    void shouldApplySuccessAndRecordTheProviderTransactionEventAndCaptureJournal() {
         PaymentIntent intent = startedIntent("ORDER-1001", "125000");
 
         WebhookResult result = webhook(intent.getId(), "evt-001", "provider-tx-001", ProviderStatus.SUCCESS, "125000");
 
         assertThat(result.outcome()).isEqualTo(WebhookOutcome.APPLIED);
-        assertThat(stateOf(intent)).isEqualTo(PaymentState.SUCCESS);
+        assertThat(reload(intent).getState()).isEqualTo(PaymentState.SUCCESS);
+        assertThat(reload(intent).getCapturedAt()).isNotNull();
         assertThat(paymentTransactionRepository.findAll()).singleElement()
                 .extracting(PaymentTransaction::getProviderStatus).isEqualTo(ProviderStatus.SUCCESS);
         assertThat(providerEventRepository.findByProviderEventId("evt-001")).get()
-                .extracting(ProviderEvent::getOutcome).isEqualTo(WebhookOutcome.APPLIED);
+                .satisfies(event -> {
+                    assertThat(event.getOutcome()).isEqualTo(WebhookOutcome.APPLIED);
+                    assertThat(event.getSource()).isEqualTo(EventSource.WEBHOOK);
+                });
+        assertThat(ledgerJournalRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId()))
+                .extracting("journalType").containsExactly(JournalType.CAPTURE);
     }
 
     @Test
-    void shouldIgnoreAnExactRedeliveryWithoutOpeningAReviewCase() {
+    void shouldIgnoreAnExactRedeliveryWithoutOpeningAReviewCaseOrPostingTwice() {
         PaymentIntent intent = startedIntent("ORDER-1001", "125000");
 
         webhook(intent.getId(), "evt-001", "provider-tx-001", ProviderStatus.SUCCESS, "125000");
@@ -45,6 +49,7 @@ class ProviderWebhookTest extends IntegrationTest {
         assertThat(stateOf(intent)).isEqualTo(PaymentState.SUCCESS);
         assertThat(paymentTransactionRepository.count()).isEqualTo(1);
         assertThat(providerEventRepository.count()).isEqualTo(1);
+        assertThat(ledgerJournalRepository.count()).isEqualTo(1);
         assertThat(openCases()).isEmpty();
         assertThat(auditFor(intent)).extracting("eventType").contains("DUPLICATE_WEBHOOK_IGNORED");
     }
@@ -73,7 +78,7 @@ class ProviderWebhookTest extends IntegrationTest {
         assertThat(stateOf(intent)).isEqualTo(PaymentState.SUCCESS);
         assertThat(paymentTransactionRepository.findAll()).singleElement()
                 .extracting(PaymentTransaction::getProviderStatus).isEqualTo(ProviderStatus.SUCCESS);
-        assertThat(settlementService.createBatch(MERCHANT, null).getTransactionCount()).isEqualTo(1);
+        assertThat(settle(MERCHANT_A).getTransactionCount()).isEqualTo(1);
     }
 
     @Test
@@ -139,6 +144,7 @@ class ProviderWebhookTest extends IntegrationTest {
         assertThat(late.outcome()).isEqualTo(WebhookOutcome.SENT_TO_REVIEW);
         assertThat(stateOf(intent)).isEqualTo(PaymentState.FAILED);
         assertThat(openReviewReasons()).containsExactly(ReviewReason.INVALID_STATE_TRANSITION);
+        assertThat(ledgerJournalRepository.count()).as("no money moves on a contradicted event").isZero();
     }
 
     @Test
@@ -190,8 +196,8 @@ class ProviderWebhookTest extends IntegrationTest {
         assertThat(corrected.outcome()).isEqualTo(WebhookOutcome.DEFERRED);
         assertThat(providerEventRepository.findByProviderEventId("evt-011-correct")).isEmpty();
 
-        reviewWorkflowService.resolve(openCases().getFirst().getId(),
-                new ResolveReviewCaseRequest("ops-1", "Provider confirmed the first amount was a display bug.", ReviewAction.RELEASE_PAYMENT));
+        reviewWorkflowService.resolve(openCases().getFirst().getId(), new ResolveReviewCaseRequest(
+                "Provider confirmed the first amount was a display bug.", ReviewAction.RELEASE_PAYMENT), OPS_ANA);
         WebhookResult redelivered = webhook(intent.getId(), "evt-011-correct", "provider-tx-011", ProviderStatus.SUCCESS, "60000");
 
         assertThat(redelivered.outcome()).isEqualTo(WebhookOutcome.APPLIED);
@@ -223,20 +229,28 @@ class ProviderWebhookTest extends IntegrationTest {
     }
 
     @Test
-    void shouldRejectAnInvalidSignatureWithoutWritingAnything() {
-        PaymentIntent intent = startedIntent("ORDER-1015", "1000");
-        long auditBefore = auditEventRepository.count();
+    void shouldQueueAReversalWhenTheProviderAsksBeforePayout() {
+        PaymentIntent intent = capturedIntent("ORDER-1019", "5000");
 
-        assertThatThrownBy(() -> providerWebhookService.process(new ProviderWebhookRequest(
-                "evt-015", "provider-tx-015", intent.getId(), ProviderStatus.SUCCESS, new BigDecimal("1000"), "IDR"),
-                "forged"))
-                .isInstanceOf(BusinessException.class)
-                .extracting("code").isEqualTo(ErrorCode.INVALID_SIGNATURE);
+        WebhookResult result = webhook(intent.getId(), "evt-1019-reversal", "tx-ORDER-1019", ProviderStatus.REVERSAL_REQUIRED, "5000");
 
-        assertThat(stateOf(intent)).isEqualTo(PaymentState.PENDING);
-        assertThat(openCases()).isEmpty();
-        assertThat(providerEventRepository.count()).isZero();
-        assertThat(auditEventRepository.count()).isEqualTo(auditBefore);
+        assertThat(result.outcome()).isEqualTo(WebhookOutcome.APPLIED);
+        assertThat(stateOf(intent)).isEqualTo(PaymentState.REVERSAL_REQUIRED);
+        assertThat(outboxCommandRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId()))
+                .singleElement().extracting("commandType").isEqualTo(CommandType.REVERSAL);
+    }
+
+    @Test
+    void shouldHoldInsteadOfReversingWhenTheProviderAsksAfterPayout() {
+        PaymentIntent intent = capturedIntent("ORDER-1020", "5000");
+        settle(MERCHANT_A);
+
+        WebhookResult result = webhook(intent.getId(), "evt-1020-reversal", "tx-ORDER-1020", ProviderStatus.REVERSAL_REQUIRED, "5000");
+
+        assertThat(result.reviewReason()).isEqualTo(ReviewReason.INVALID_STATE_TRANSITION);
+        assertThat(reload(intent).getState()).isEqualTo(PaymentState.MANUAL_REVIEW);
+        assertThat(reload(intent).getStateBeforeReview()).isEqualTo(PaymentState.SETTLED);
+        assertThat(outboxCommandRepository.count()).as("money already paid out needs an operator decision").isZero();
     }
 
     @Test
@@ -249,6 +263,7 @@ class ProviderWebhookTest extends IntegrationTest {
         assertThat(results).filteredOn(WebhookOutcome.APPLIED::equals).hasSize(1);
         assertThat(results).filteredOn(r -> r != WebhookOutcome.APPLIED).containsOnly(WebhookOutcome.DUPLICATE_IGNORED);
         assertThat(paymentTransactionRepository.count()).isEqualTo(1);
+        assertThat(ledgerJournalRepository.count()).isEqualTo(1);
         assertThat(auditFor(intent)).filteredOn(event -> "PENDING".equals(event.getPreviousState())).hasSize(1);
     }
 

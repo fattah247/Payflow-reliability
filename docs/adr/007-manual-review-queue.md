@@ -1,6 +1,6 @@
 # 007 Manual Review Queue
 
-Status: amended by [011](011-review-decisions.md). Resolutions now carry decisions that act on payments and refunds.
+Status: amended by [011](011-review-decisions.md) and [018](018-maker-checker.md) (two-person approval).
 
 ## Context
 

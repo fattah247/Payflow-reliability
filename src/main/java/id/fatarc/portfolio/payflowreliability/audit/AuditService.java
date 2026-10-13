@@ -8,8 +8,12 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Audit events join the caller's transaction on purpose: an audit row commits exactly when
- * the change it describes commits, so the trail never claims something that was rolled back.
+ * Audit events join the caller's transaction on purpose: an audit row commits exactly when the
+ * change it describes commits, so the trail never claims something that was rolled back.
+ *
+ * <p>Each event is appended to a hash chain (one chain per payment, otherwise per aggregate).
+ * Writers of payment events hold that payment's row lock, so a chain never forks; the unique
+ * (chain, sequence) constraint turns any unexpected race into a retryable 409 instead of a fork.
  */
 @Service
 public class AuditService {
@@ -29,18 +33,8 @@ public class AuditService {
                        String actor,
                        String reason,
                        String metadata) {
-        auditEventRepository.save(new AuditEvent(
-                aggregateType,
-                aggregateId,
-                paymentIntentId,
-                eventType,
-                null,
-                null,
-                actor,
-                reason,
-                metadata,
-                RequestId.current()
-        ));
+        append(new AuditEvent(aggregateType, aggregateId, paymentIntentId, eventType, null, null,
+                actor, reason, metadata, RequestId.current()));
     }
 
     /** Records a payment lifecycle transition. */
@@ -51,18 +45,8 @@ public class AuditService {
                                   String actor,
                                   String reason,
                                   String metadata) {
-        auditEventRepository.save(new AuditEvent(
-                AggregateType.PAYMENT_INTENT,
-                paymentIntentId.toString(),
-                paymentIntentId,
-                STATE_CHANGED,
-                previousState.name(),
-                newState.name(),
-                actor,
-                reason,
-                metadata,
-                RequestId.current()
-        ));
+        append(new AuditEvent(AggregateType.PAYMENT_INTENT, paymentIntentId.toString(), paymentIntentId, STATE_CHANGED,
+                previousState.name(), newState.name(), actor, reason, metadata, RequestId.current()));
     }
 
     @Transactional(readOnly = true)
@@ -72,6 +56,13 @@ public class AuditService {
 
     @Transactional(readOnly = true)
     public List<AuditEvent> paymentHistory(UUID paymentIntentId) {
-        return auditEventRepository.findByPaymentIntentIdOrderByCreatedAtAsc(paymentIntentId);
+        return auditEventRepository.findByPaymentIntentIdOrderBySequenceNumberAsc(paymentIntentId);
+    }
+
+    private void append(AuditEvent event) {
+        var head = auditEventRepository.findFirstByChainKeyOrderBySequenceNumberDesc(event.getChainKey());
+        event.seal(head.map(previous -> previous.getSequenceNumber() + 1).orElse(1L),
+                head.map(AuditEvent::getEventHash).orElse(AuditHash.GENESIS));
+        auditEventRepository.save(event);
     }
 }

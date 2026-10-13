@@ -1,9 +1,17 @@
-# Shared helpers for scripts/demo-readable.sh and scripts/scenarios.sh. Source, do not run.
-# Callers set MERCHANT_ID before using create_payment.
+# Shared helpers for scripts/demo.sh, scripts/demo-readable.sh and scripts/scenarios.sh. Source, do not run.
+#
+# Defaults match the local configuration in application.yml. The operator keys and the webhook secret
+# are local demo values; never use them outside a developer machine.
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
-SIGNATURE="${SIGNATURE:-local-demo-signature}"
+OPS_KEY="${OPS_KEY:-pf_o_local_ops-ana}"
+OPS_KEY_2="${OPS_KEY_2:-pf_o_local_ops-budi}"
+PROVIDER_KEY="${PROVIDER_KEY:-sim_local_provider_key}"
+WEBHOOK_SECRET="${WEBHOOK_SECRET:-whsec_local_payflow}"
 CHECK_FAILURES=0
+API_KEY=""
+MERCHANT_ID=""
+MERCHANT_KEY=""
 
 require_tools() {
   local dependency
@@ -13,15 +21,17 @@ require_tools() {
   curl -sf "$BASE_URL/actuator/health" >/dev/null || { echo "app is not reachable at $BASE_URL" >&2; exit 1; }
 }
 
-# request METHOD PATH BODY [HEADER...]  -> sets STATUS, BODY and REPLAYED (the Idempotent-Replayed header)
+# request METHOD PATH BODY [HEADER...]  -> sets STATUS, BODY and REPLAYED (the Idempotent-Replayed header).
+# Sends "Authorization: Bearer $API_KEY" when API_KEY is set (see as_merchant, as_ops, ...).
 request() {
   local method="$1" path="$2" body="$3"
   shift 3
   local args=(-sS -X "$method" "$BASE_URL$path" -H 'Content-Type: application/json'
     -w $'\n%header{idempotent-replayed}\n%{http_code}')
+  if [ -n "${API_KEY:-}" ]; then args+=(-H "Authorization: Bearer $API_KEY"); fi
   local header
   for header in "$@"; do args+=(-H "$header"); done
-  if [ -n "$body" ]; then args+=(-d "$body"); fi
+  if [ -n "$body" ]; then args+=(--data-binary "$body"); fi
   local output rest
   output=$(curl "${args[@]}")
   STATUS="${output##*$'\n'}"
@@ -29,6 +39,13 @@ request() {
   REPLAYED="${rest##*$'\n'}"
   BODY="${rest%$'\n'*}"
 }
+
+# Run any command as a given caller: as_merchant request GET /api/payment-intents/...
+as_merchant() { local API_KEY="$MERCHANT_KEY"; "$@"; }
+as_ops() { local API_KEY="$OPS_KEY"; "$@"; }
+as_ops2() { local API_KEY="$OPS_KEY_2"; "$@"; }
+as_provider() { local API_KEY="$PROVIDER_KEY"; "$@"; }
+anonymous() { local API_KEY=""; "$@"; }
 
 # pick DOTTED.PATH  -> prints a field of BODY (list indexes allowed, e.g. rows.0.outcome)
 pick() {
@@ -54,8 +71,13 @@ section() {
   printf '\n== %s ==\n' "$1"
 }
 
+# show LABEL VALUE  -> one aligned line; long values continue on following lines
 show() {
-  printf '   %-36s %s\n' "$1" "$2"
+  local label="$1" line
+  while IFS= read -r line; do
+    printf '   %-36s %s\n' "$label" "$line"
+    label=""
+  done < <(printf '%s\n' "$2" | fold -s -w 80)
 }
 
 # check LABEL ACTUAL EXPECTED  -> prints PASS or FAIL and remembers failures
@@ -68,25 +90,137 @@ check() {
   fi
 }
 
+# onboard_merchant ID  -> registers the merchant (operator call) and keeps its API key in MERCHANT_KEY
+onboard_merchant() {
+  MERCHANT_ID="$1"
+  as_ops request POST /api/merchants "{\"merchantId\": \"$MERCHANT_ID\", \"displayName\": \"Demo $MERCHANT_ID\"}"
+  if [ "$STATUS" != "201" ]; then
+    echo "could not register merchant $MERCHANT_ID: HTTP $STATUS $BODY" >&2
+    exit 1
+  fi
+  MERCHANT_KEY=$(pick apiKey.apiKey)
+}
+
+# create_payment REFERENCE AMOUNT [HEADER...]  -> as the merchant, idempotency key derived from the reference
 create_payment() {
   local reference="$1" amount="$2"
   shift 2
-  request POST /api/payment-intents \
-    "{\"merchantId\": \"$MERCHANT_ID\", \"merchantReference\": \"$reference\", \"amount\": $amount, \"currency\": \"IDR\"}" \
+  as_merchant request POST /api/payment-intents \
+    "{\"merchantReference\": \"$reference\", \"amount\": $amount, \"currency\": \"IDR\"}" \
     "Idempotency-Key: key-$reference" "$@"
 }
 
+start_payment() {
+  local payment="$1"
+  shift
+  as_merchant request POST "/api/payment-intents/$payment/start" "" "$@"
+}
+
+# sign BODY [UNIX_SECONDS]  -> X-Provider-Signature value: t=<ts>,v1=<HMAC-SHA256(secret, "<ts>." + body)>
+sign() {
+  python3 -c '
+import hashlib, hmac, sys, time
+body, secret = sys.argv[1], sys.argv[2]
+ts = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else str(int(time.time()))
+mac = hmac.new(secret.encode(), (ts + "." + body).encode(), hashlib.sha256).hexdigest()
+print("t=%s,v1=%s" % (ts, mac))' "$1" "$WEBHOOK_SECRET" "${2:-}"
+}
+
+webhook_body() {
+  printf '{"providerEventId": "%s", "providerTransactionId": "%s", "paymentIntentId": "%s", "status": "%s", "amount": %s, "currency": "IDR"}' \
+    "$2" "$3" "$1" "$4" "$5"
+}
+
+# webhook PAYMENT EVENT TX STATUS AMOUNT [HEADER...]  -> a correctly signed provider webhook
 webhook() {
   local payment="$1" event="$2" tx="$3" status="$4" amount="$5"
   shift 5
-  request POST /fake-provider/webhook \
-    "{\"providerEventId\": \"$event\", \"providerTransactionId\": \"$tx\", \"paymentIntentId\": \"$payment\", \"status\": \"$status\", \"amount\": $amount, \"currency\": \"IDR\"}" \
-    "X-Provider-Signature: $SIGNATURE" "$@"
+  local body
+  body=$(webhook_body "$payment" "$event" "$tx" "$status" "$amount")
+  anonymous request POST /fake-provider/webhook "$body" "X-Provider-Signature: $(sign "$body")" "$@"
 }
 
+# resolve_case ID ACTION NOTE [HEADER...]  -> as operator ops-ana
 resolve_case() {
   local case_id="$1" action="$2" note="$3"
   shift 3
-  request POST "/api/review-cases/$case_id/resolve" \
-    "{\"actor\": \"ops-demo\", \"note\": \"$note\", \"action\": \"$action\"}" "$@"
+  as_ops request POST "/api/review-cases/$case_id/resolve" "{\"note\": \"$note\", \"action\": \"$action\"}" "$@"
+}
+
+# ---- provider simulator: the customer and the outside world ----------------------------------------
+
+# customer_pays PAYMENT AMOUNT [EXTRA_JSON]  -> the customer pays at the provider, which then sends webhooks
+customer_pays() {
+  local extra="${3:-}"
+  as_provider request POST "/provider-sim/v1/payments/$1/pay" \
+    "{\"amount\": $2, \"currency\": \"IDR\"${extra:+, $extra}}"
+}
+
+customer_action() {
+  as_provider request POST "/provider-sim/v1/payments/$1/$2" "${3:-}"
+}
+
+# provider_fault OPERATION MODE TIMES  -> e.g. provider_fault REFUND TIMEOUT_AFTER_COMMIT 1
+provider_fault() {
+  as_provider request POST /provider-sim/v1/faults "{\"operation\": \"$1\", \"mode\": \"$2\", \"times\": $3}"
+}
+
+clear_faults() {
+  as_provider request DELETE /provider-sim/v1/faults ""
+}
+
+# Background workers deliver webhooks and run provider calls every second; these run them now.
+deliver_webhooks() { as_provider request POST /provider-sim/v1/webhooks/dispatch ""; }
+run_outbox() { as_ops request POST /api/outbox/run ""; }
+
+# wait_for_state PAYMENT STATE [SECONDS]  -> polls the payment (nudging the workers) until it reaches STATE
+wait_for_state() {
+  local payment="$1" expected="$2" seconds="${3:-15}" i
+  for ((i = 0; i < seconds * 2; i++)); do
+    as_ops request GET "/api/payment-intents/$payment" ""
+    if [ "$(pick state)" = "$expected" ]; then return 0; fi
+    deliver_webhooks
+    run_outbox
+    sleep 0.5
+  done
+  as_ops request GET "/api/payment-intents/$payment" ""
+  return 1
+}
+
+# wait_for_refund REFUND STATUS [SECONDS]
+wait_for_refund() {
+  local refund="$1" expected="$2" seconds="${3:-15}" i
+  for ((i = 0; i < seconds * 2; i++)); do
+    as_ops request GET "/api/refunds/$refund" ""
+    if [ "$(pick status)" = "$expected" ]; then return 0; fi
+    run_outbox
+    sleep 0.5
+  done
+  return 1
+}
+
+# paid REFERENCE AMOUNT  -> creates and starts a payment, the customer pays, the webhook lands; prints the id
+paid() {
+  local reference="$1" amount="$2" id
+  create_payment "$reference" "$amount"
+  id=$(pick id)
+  start_payment "$id"
+  customer_pays "$id" "$amount"
+  wait_for_state "$id" SUCCESS >/dev/null || { echo "payment $id did not reach SUCCESS" >&2; exit 1; }
+  printf '%s' "$id"
+}
+
+# provider_tx PAYMENT  -> the provider transaction id recorded for the payment
+provider_tx() {
+  as_ops request GET "/api/payment-intents/$1/case-file" ""
+  pick providerTransactions.0.providerTransactionId
+}
+
+# owed MERCHANT  -> what the ledger says the platform owes the merchant in IDR
+owed() {
+  as_ops request GET "/api/ledger/balances?merchantId=$1&currency=IDR" ""
+  printf '%s' "$BODY" | python3 -c '
+import decimal, json, sys
+rows = json.load(sys.stdin, parse_float=decimal.Decimal)
+print(rows[0]["owedToMerchant"] if rows else "0")'
 }
