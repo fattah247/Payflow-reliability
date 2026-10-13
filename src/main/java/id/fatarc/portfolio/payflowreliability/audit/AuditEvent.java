@@ -2,13 +2,19 @@ package id.fatarc.portfolio.payflowreliability.audit;
 
 import id.fatarc.portfolio.payflowreliability.common.Text;
 import jakarta.persistence.*;
+import org.springframework.data.domain.Persistable;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
+/**
+ * Append-only, hash-chained evidence. On PostgreSQL a trigger rejects updates and deletes; on any
+ * database, {@link AuditChainVerifier} detects edits by recomputing the chain.
+ */
 @Entity
 @Table(name = "audit_events")
-public class AuditEvent {
+public class AuditEvent implements Persistable<UUID> {
     @Id
     private UUID id;
 
@@ -44,6 +50,21 @@ public class AuditEvent {
     @Column(nullable = false)
     private Instant createdAt;
 
+    @Column(nullable = false)
+    private String chainKey;
+
+    @Column(nullable = false)
+    private Long sequenceNumber;
+
+    @Column(nullable = false, length = 64)
+    private String previousHash;
+
+    @Column(nullable = false, length = 64)
+    private String eventHash;
+
+    @Transient
+    private boolean persisted;
+
     protected AuditEvent() {
     }
 
@@ -64,13 +85,39 @@ public class AuditEvent {
         this.eventType = eventType;
         this.previousState = previousState;
         this.newState = newState;
-        this.actor = Text.fit(actor, 100);
+        this.actor = Text.fit(actor, 150);
         this.reason = Text.fit(reason, 1000);
         this.metadata = Text.fit(metadata, 2000);
         this.requestId = requestId;
-        this.createdAt = Instant.now();
+        // Microseconds: what the database stores, so the hash recomputed from stored values matches.
+        this.createdAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        this.chainKey = AuditHash.chainKey(paymentIntentId, aggregateType, aggregateId);
     }
 
+    /** Links this event after the current head of its chain and computes its hash. */
+    void seal(long sequenceNumber, String previousHash) {
+        this.sequenceNumber = sequenceNumber;
+        this.previousHash = previousHash;
+        this.eventHash = computeHash();
+    }
+
+    String computeHash() {
+        return AuditHash.compute(chainKey, sequenceNumber, previousHash, id, aggregateType, aggregateId, paymentIntentId,
+                eventType, previousState, newState, actor, reason, metadata, requestId, createdAt);
+    }
+
+    @Override
+    public boolean isNew() {
+        return !persisted;
+    }
+
+    @PostLoad
+    @PostPersist
+    void markPersisted() {
+        persisted = true;
+    }
+
+    @Override
     public UUID getId() { return id; }
     public String getAggregateType() { return aggregateType; }
     public String getAggregateId() { return aggregateId; }
@@ -83,4 +130,8 @@ public class AuditEvent {
     public String getMetadata() { return metadata; }
     public String getRequestId() { return requestId; }
     public Instant getCreatedAt() { return createdAt; }
+    public String getChainKey() { return chainKey; }
+    public Long getSequenceNumber() { return sequenceNumber; }
+    public String getPreviousHash() { return previousHash; }
+    public String getEventHash() { return eventHash; }
 }

@@ -17,6 +17,7 @@ services:
       retries: 10
 
   # Optional: `docker compose up --build` runs the whole system without a local JDK.
+  # The secrets below are the documented local demo values; set real ones through the environment elsewhere.
   app:
     build: .
     depends_on:
@@ -26,8 +27,25 @@ services:
       PAYFLOW_DB_URL: jdbc:postgresql://postgres:5432/payflow_reliability
       PAYFLOW_DB_USERNAME: payflow_reliability
       PAYFLOW_DB_PASSWORD: payflow_reliability
+      PAYFLOW_PROVIDER_API_KEY: sim_local_provider_key
+      PAYFLOW_PROVIDER_WEBHOOK_SECRETS: whsec_local_payflow
+      PAYFLOW_PROVIDER_SIM_WEBHOOK_SECRET: whsec_local_payflow
     ports:
       - "8080:8080"
+
+  # Optional: `docker compose --profile observability up` adds Prometheus with the alert rules loaded,
+  # scraping the app (or one started with ./mvnw spring-boot:run) at http://localhost:9090.
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    profiles: ["observability"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9090:9090"
 
 volumes:
   payflow_reliability_pgdata:

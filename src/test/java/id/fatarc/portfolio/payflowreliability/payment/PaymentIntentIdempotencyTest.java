@@ -14,12 +14,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PaymentIntentIdempotencyTest extends IntegrationTest {
     private static final CreatePaymentIntentRequest ORDER_1 =
-            new CreatePaymentIntentRequest("merchant-test-01", "ORDER-1", new BigDecimal("50000"), "IDR");
+            new CreatePaymentIntentRequest(null, "ORDER-1", new BigDecimal("50000"), "IDR");
 
     @Test
     void shouldReturnSamePaymentIntentForSameIdempotencyKey() {
-        PaymentIntentCreation first = paymentIntentService.create(ORDER_1, "same-key-001");
-        PaymentIntentCreation second = paymentIntentService.create(ORDER_1, "same-key-001");
+        PaymentIntentCreation first = paymentIntentService.create(ORDER_1, "same-key-001", AS_MERCHANT_A);
+        PaymentIntentCreation second = paymentIntentService.create(ORDER_1, "same-key-001", AS_MERCHANT_A);
 
         assertThat(first.replayed()).isFalse();
         assertThat(second.replayed()).isTrue();
@@ -31,11 +31,10 @@ class PaymentIntentIdempotencyTest extends IntegrationTest {
 
     @Test
     void shouldRejectSameIdempotencyKeyWithDifferentPayload() {
-        paymentIntentService.create(ORDER_1, "same-key-002");
-        CreatePaymentIntentRequest changed =
-                new CreatePaymentIntentRequest("merchant-test-01", "ORDER-2", new BigDecimal("75000"), "IDR");
+        paymentIntentService.create(ORDER_1, "same-key-002", AS_MERCHANT_A);
+        CreatePaymentIntentRequest changed = new CreatePaymentIntentRequest(null, "ORDER-2", new BigDecimal("75000"), "IDR");
 
-        assertThatThrownBy(() -> paymentIntentService.create(changed, "same-key-002"))
+        assertThatThrownBy(() -> paymentIntentService.create(changed, "same-key-002", AS_MERCHANT_A))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("different request payload")
                 .extracting("code").isEqualTo(ErrorCode.IDEMPOTENCY_KEY_REUSED);
@@ -44,27 +43,33 @@ class PaymentIntentIdempotencyTest extends IntegrationTest {
     }
 
     @Test
+    void shouldTreatTheSameAmountAtADifferentScaleAsTheSameRequest() {
+        paymentIntentService.create(ORDER_1, "scale-key", AS_MERCHANT_A);
+        CreatePaymentIntentRequest sameAmount = new CreatePaymentIntentRequest(null, "ORDER-1", new BigDecimal("50000.00"), "IDR");
+
+        assertThat(paymentIntentService.create(sameAmount, "scale-key", AS_MERCHANT_A).replayed()).isTrue();
+    }
+
+    @Test
     void shouldRejectMissingIdempotencyKeyForPaymentCreation() {
-        assertThatThrownBy(() -> paymentIntentService.create(ORDER_1, " "))
+        assertThatThrownBy(() -> paymentIntentService.create(ORDER_1, " ", AS_MERCHANT_A))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("Idempotency-Key header is required");
     }
 
     @Test
     void shouldScopeIdempotencyKeysPerMerchant() {
-        CreatePaymentIntentRequest otherMerchant =
-                new CreatePaymentIntentRequest("merchant-test-02", "ORDER-9", new BigDecimal("10000"), "IDR");
-
-        PaymentIntent first = paymentIntentService.create(ORDER_1, "shared-key").intent();
-        PaymentIntentCreation second = paymentIntentService.create(otherMerchant, "shared-key");
+        PaymentIntent first = paymentIntentService.create(ORDER_1, "shared-key", AS_MERCHANT_A).intent();
+        PaymentIntentCreation second = paymentIntentService.create(ORDER_1, "shared-key", AS_MERCHANT_B);
 
         assertThat(second.replayed()).isFalse();
         assertThat(second.intent().getId()).isNotEqualTo(first.getId());
+        assertThat(second.intent().getMerchantId()).isEqualTo(MERCHANT_B);
     }
 
     @Test
     void shouldCreateExactlyOneIntentWhenTheSameKeyArrivesConcurrently() throws Exception {
-        List<Object> results = race(8, () -> paymentIntentService.create(ORDER_1, "race-key").intent().getId());
+        List<Object> results = race(8, () -> paymentIntentService.create(ORDER_1, "race-key", AS_MERCHANT_A).intent().getId());
 
         assertThat(results).allSatisfy(result -> assertThat(result).isNotInstanceOf(Throwable.class));
         assertThat(results).containsOnly(results.getFirst());
@@ -73,10 +78,10 @@ class PaymentIntentIdempotencyTest extends IntegrationTest {
 
     @Test
     void shouldTreatARetriedStartAsANoOp() {
-        PaymentIntent intent = paymentIntentService.create(ORDER_1, "start-key").intent();
+        PaymentIntent intent = paymentIntentService.create(ORDER_1, "start-key", AS_MERCHANT_A).intent();
 
-        paymentIntentService.start(intent.getId());
-        PaymentIntent retried = paymentIntentService.start(intent.getId());
+        paymentIntentService.start(intent.getId(), AS_MERCHANT_A);
+        PaymentIntent retried = paymentIntentService.start(intent.getId(), AS_MERCHANT_A);
 
         assertThat(retried.getState()).isEqualTo(PaymentState.PENDING);
         assertThat(auditFor(intent)).filteredOn(event -> "TRANSACTION_STATE_CHANGED".equals(event.getEventType()))

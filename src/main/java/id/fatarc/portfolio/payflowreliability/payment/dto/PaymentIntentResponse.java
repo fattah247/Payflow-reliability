@@ -9,6 +9,8 @@ import java.util.UUID;
 
 /**
  * @param stateBeforeReview set only while the payment is in MANUAL_REVIEW: where releasing it would return to
+ * @param refundedAmount    refunds confirmed by the provider (partial refunds keep the lifecycle state)
+ * @param reversedAmount    captured money returned by a confirmed reversal
  */
 public record PaymentIntentResponse(
         UUID id,
@@ -18,6 +20,9 @@ public record PaymentIntentResponse(
         String currency,
         PaymentState state,
         PaymentState stateBeforeReview,
+        Instant capturedAt,
+        BigDecimal refundedAmount,
+        BigDecimal reversedAmount,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -30,6 +35,9 @@ public record PaymentIntentResponse(
                 intent.getCurrency(),
                 intent.getState(),
                 intent.getStateBeforeReview(),
+                intent.getCapturedAt(),
+                intent.getRefundedAmount(),
+                intent.getReversedAmount(),
                 intent.getCreatedAt(),
                 intent.getUpdatedAt()
         );

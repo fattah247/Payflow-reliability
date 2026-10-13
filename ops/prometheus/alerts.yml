@@ -1,0 +1,122 @@
+# Prometheus alerting rules for Payflow Reliability.
+# Every metric referenced here is checked against the application's /actuator/prometheus output by
+# AlertRulesTest, so a renamed metric fails the build instead of silently disabling an alert.
+# severity=page: money may be wrong or stuck right now. severity=ticket: needs attention within hours.
+groups:
+  - name: payflow-money
+    rules:
+      - alert: PayflowLedgerInvariantViolated
+        expr: payflow_ledger_invariant_violations > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Ledger disagrees with payments, refunds or payouts ({{ $value }} violation(s))"
+          runbook: docs/runbook.md#ledger-invariant-violated
+
+      - alert: PayflowLedgerCheckNotRunning
+        expr: payflow_ledger_invariant_check_age_seconds > 1800
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The ledger invariant check has not run for over 30 minutes"
+          runbook: docs/runbook.md#ledger-check-not-running
+
+      - alert: PayflowProviderCallOutcomeUnknown
+        expr: payflow_outbox_needs_review > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} refund/reversal call(s) have an unknown outcome after all retries"
+          runbook: docs/runbook.md#provider-call-outcome-unknown
+
+      - alert: PayflowProviderCallsBacklogAging
+        expr: payflow_outbox_oldest_pending_age_seconds > 900
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Oldest pending provider call is {{ $value | humanizeDuration }} old"
+          runbook: docs/runbook.md#provider-calls-backlog-aging
+
+      - alert: PayflowProviderCallsFailing
+        expr: |
+          sum(rate(payflow_outbox_calls_total{result=~"unknown|escalated"}[10m]))
+            / clamp_min(sum(rate(payflow_outbox_calls_total[10m])), 1e-9) > 0.2
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "More than 20% of provider calls end without a definite answer"
+          runbook: docs/runbook.md#provider-calls-failing
+
+  - name: payflow-flow
+    rules:
+      - alert: PayflowPaymentsStuck
+        expr: payflow_payments_stuck > 10
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} payments have waited on the provider longer than the sweeper threshold"
+          runbook: docs/runbook.md#payments-stuck
+
+      - alert: PayflowWebhookSignatureFailures
+        expr: sum(rate(payflow_webhook_rejected_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Webhooks are being rejected (bad signature or replay window); check secret rotation"
+          runbook: docs/runbook.md#webhook-signature-failures
+
+      - alert: PayflowWebhooksSentToReview
+        expr: sum(rate(payflow_webhook_events_total{outcome="SENT_TO_REVIEW"}[15m])) * 900 > 10
+        for: 0m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "More than 10 provider events went to manual review in 15 minutes"
+          runbook: docs/runbook.md#webhooks-sent-to-review
+
+      - alert: PayflowHttpErrors
+        expr: |
+          sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_server_requests_seconds_count[5m])), 1e-9) > 0.02
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "More than 2% of requests fail with a server error"
+          runbook: docs/runbook.md#http-errors
+
+  - name: payflow-operations
+    rules:
+      - alert: PayflowReviewQueueAging
+        expr: payflow_review_queue_oldest_age_seconds > 14400
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A review case has been waiting for over 4 hours"
+          runbook: docs/runbook.md#review-queue-aging
+
+      - alert: PayflowApprovalWaiting
+        expr: payflow_review_queue_awaiting_approval > 0
+        for: 1h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} money-moving decision(s) wait for a second operator"
+          runbook: docs/runbook.md#approval-waiting
+
+      - alert: PayflowMetricsStale
+        expr: payflow_metrics_snapshot_age_seconds > 300
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Operational gauges have not refreshed for 5 minutes (database or scheduler problem)"
+          runbook: docs/runbook.md#metrics-stale

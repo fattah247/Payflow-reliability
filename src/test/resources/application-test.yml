@@ -1,0 +1,42 @@
+spring:
+  datasource:
+    # LOCK_TIMEOUT lets concurrency tests queue on row locks the way PostgreSQL does.
+    url: jdbc:h2:mem:payflow_reliability_test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    username: sa
+    password:
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+payflow:
+  security:
+    operators:
+      - name: ops-ana
+        key-sha256: 451b6c30e1bcb5d502c32785490acaf14eab8497bec087909f795a1569774126
+      - name: ops-budi
+        key-sha256: 402fdb729fcefc9d789331f534b5788589523fc37f1bb538826eefa1becf7035
+  provider:
+    base-url:
+    api-key: sim_test_provider_key
+    webhook-secrets: whsec_test_current,whsec_test_previous
+    connect-timeout: 1s
+    read-timeout: 500ms
+  provider-sim:
+    enabled: true
+    api-key: sim_test_provider_key
+    webhook-secret: whsec_test_current
+    max-delivery-attempts: 3
+    delivery-base-backoff: 1ms
+    delivery-max-backoff: 2ms
+    fault-delay: 1500ms
+  # Tests run every background job explicitly, so outcomes do not depend on timing.
+  workers:
+    enabled: false
+  outbox:
+    max-attempts: 3
+    lease: 2s
+    base-backoff: 1ms
+    max-backoff: 2ms
+    blocked-retry: 1ms

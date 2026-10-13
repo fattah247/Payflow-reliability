@@ -34,7 +34,7 @@ public class ProviderEvent {
     @Column(nullable = false)
     private ProviderStatus status;
 
-    @Column(nullable = false, precision = 19, scale = 2)
+    @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
     @Column(nullable = false, length = 3)
@@ -43,6 +43,10 @@ public class ProviderEvent {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private WebhookOutcome outcome;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private EventSource source;
 
     @Column(nullable = false, length = 1000)
     private String detail;
@@ -55,15 +59,17 @@ public class ProviderEvent {
     protected ProviderEvent() {
     }
 
-    public ProviderEvent(ProviderWebhookRequest webhook, WebhookOutcome outcome, String detail, UUID reviewCaseId) {
+    public ProviderEvent(ProviderWebhookRequest webhook, EventSource source, WebhookOutcome outcome, String detail,
+                         UUID reviewCaseId) {
         this.id = UUID.randomUUID();
         this.providerEventId = webhook.providerEventId();
         this.providerTransactionId = webhook.providerTransactionId();
         this.paymentIntentId = webhook.paymentIntentId();
         this.status = webhook.status();
-        this.amount = Money.normalize(webhook.amount());
+        this.amount = Money.normalize(webhook.amount(), webhook.currency());
         this.currency = webhook.currency();
         this.outcome = outcome;
+        this.source = source;
         this.detail = Text.fit(detail, 1000);
         this.reviewCaseId = reviewCaseId;
         this.receivedAt = Instant.now();
@@ -83,9 +89,10 @@ public class ProviderEvent {
     public String getProviderTransactionId() { return providerTransactionId; }
     public UUID getPaymentIntentId() { return paymentIntentId; }
     public ProviderStatus getStatus() { return status; }
-    public BigDecimal getAmount() { return amount; }
+    public BigDecimal getAmount() { return Money.atScale(amount, currency); }
     public String getCurrency() { return currency; }
     public WebhookOutcome getOutcome() { return outcome; }
+    public EventSource getSource() { return source; }
     public String getDetail() { return detail; }
     public UUID getReviewCaseId() { return reviewCaseId; }
     public Instant getReceivedAt() { return receivedAt; }

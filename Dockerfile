@@ -12,4 +12,8 @@ WORKDIR /app
 COPY --from=build /app/target/Payflow-reliability-0.1.0.jar app.jar
 USER payflow
 EXPOSE 8080
+# Size the heap from the container's memory limit; shut down gracefully on SIGTERM (server.shutdown=graceful).
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
+HEALTHCHECK --interval=10s --timeout=3s --start-period=40s --retries=5 \
+  CMD wget -qO- http://localhost:8080/actuator/health/liveness >/dev/null || exit 1
 ENTRYPOINT ["java", "-jar", "app.jar"]

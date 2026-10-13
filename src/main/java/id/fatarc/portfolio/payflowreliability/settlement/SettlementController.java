@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import id.fatarc.portfolio.payflowreliability.security.Caller;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import org.springframework.http.HttpStatus;
@@ -19,14 +20,15 @@ public class SettlementController {
         this.settlementService = settlementService;
     }
 
-    /** {@code currency} is required only when the merchant has eligible payments in more than one currency. */
+    /** {@code currency} is required only when the merchant has payable items in more than one currency. */
     @PostMapping("/batches")
     @ResponseStatus(HttpStatus.CREATED)
     public SettlementBatch createBatch(
             @RequestParam @NotBlank String merchantId,
             @RequestParam(required = false)
-            @Pattern(regexp = "[A-Z]{3}", message = "must be a 3-letter uppercase ISO currency code") String currency) {
-        return settlementService.createBatch(merchantId, currency);
+            @Pattern(regexp = "[A-Z]{3}", message = "must be a 3-letter uppercase ISO currency code") String currency,
+            Caller caller) {
+        return settlementService.createBatch(merchantId, currency, caller);
     }
 
     @GetMapping("/batches")
@@ -37,5 +39,11 @@ public class SettlementController {
     @GetMapping("/batches/{batchId}/items")
     public List<SettlementBatchItem> listBatchItems(@PathVariable UUID batchId) {
         return settlementService.getItems(batchId);
+    }
+
+    /** What would be paid out now, per merchant and currency. */
+    @GetMapping("/backlog")
+    public List<SettlementService.Backlog> backlog() {
+        return settlementService.backlog();
     }
 }

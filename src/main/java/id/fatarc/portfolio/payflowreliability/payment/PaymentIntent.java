@@ -15,12 +15,11 @@ import static id.fatarc.portfolio.payflowreliability.payment.PaymentState.*;
 @Entity
 @Table(name = "payment_intents")
 public class PaymentIntent {
-    /** States a payment can be put on hold from; matches the documented state machine. */
-    private static final Set<PaymentState> HOLDABLE = EnumSet.of(CREATED, PENDING, AUTHORIZED, SUCCESS, SETTLED);
-    /** States in which the provider has already captured the money. */
-    private static final Set<PaymentState> CAPTURED = EnumSet.of(SUCCESS, SETTLED, RECONCILED, REFUND_REQUESTED, REFUNDED);
+    /** States a payment can be put on hold from; final outcomes are facts and are never held. */
+    private static final Set<PaymentState> HOLDABLE = EnumSet.of(CREATED, PENDING, AUTHORIZED, SUCCESS, SETTLED, RECONCILED);
     private static final Set<PaymentState> PRE_CAPTURE = EnumSet.of(CREATED, PENDING, AUTHORIZED);
-    private static final Set<PaymentState> REVERSIBLE = EnumSet.of(AUTHORIZED, SUCCESS, SETTLED);
+    private static final Set<PaymentState> REVERSIBLE = EnumSet.of(AUTHORIZED, SUCCESS, SETTLED, RECONCILED);
+    private static final Set<PaymentState> REFUNDABLE = EnumSet.of(SUCCESS, SETTLED, RECONCILED);
 
     @Id
     private UUID id;
@@ -35,7 +34,7 @@ public class PaymentIntent {
     @Column(nullable = false)
     private String merchantReference;
 
-    @Column(nullable = false, precision = 19, scale = 2)
+    @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
     @Column(nullable = false, length = 3)
@@ -52,6 +51,20 @@ public class PaymentIntent {
     @Enumerated(EnumType.STRING)
     private PaymentState stateBeforeReview;
 
+    /** When the provider captured the money. Set once; drives the ledger capture journal. */
+    private Instant capturedAt;
+
+    /** Sum of refunds the provider confirmed. */
+    @Column(nullable = false, precision = 19, scale = 4)
+    private BigDecimal refundedAmount;
+
+    /** Captured money returned by a confirmed reversal. */
+    @Column(nullable = false, precision = 19, scale = 4)
+    private BigDecimal reversedAmount;
+
+    /** Last time the status sweeper asked the provider about this payment. */
+    private Instant lastProviderCheckAt;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -65,10 +78,12 @@ public class PaymentIntent {
         this.id = UUID.randomUUID();
         this.merchantId = merchantId;
         this.merchantReference = merchantReference;
-        this.amount = Money.normalize(amount);
+        this.amount = Money.normalize(amount, currency);
         this.currency = currency;
         this.idempotencyKey = idempotencyKey;
         this.state = CREATED;
+        this.refundedAmount = Money.zero(currency);
+        this.reversedAmount = Money.zero(currency);
         this.createdAt = Instant.now();
         this.updatedAt = this.createdAt;
     }
@@ -81,8 +96,10 @@ public class PaymentIntent {
         return transitionTo(AUTHORIZED, "Only a pending payment can be authorized.", PENDING);
     }
 
-    public PaymentState succeed() {
-        return transitionTo(SUCCESS, "Only a pending or authorized payment can succeed.", PENDING, AUTHORIZED);
+    public PaymentState succeed(Instant capturedAt) {
+        PaymentState previousState = transitionTo(SUCCESS, "Only a pending or authorized payment can succeed.", PENDING, AUTHORIZED);
+        this.capturedAt = capturedAt;
+        return previousState;
     }
 
     public PaymentState fail() {
@@ -94,9 +111,35 @@ public class PaymentIntent {
                 CREATED, PENDING, AUTHORIZED);
     }
 
+    /** Provider-requested reversal before payout. After payout it is a contradiction and goes to review. */
     public PaymentState requireReversal() {
         return transitionTo(REVERSAL_REQUIRED, "Only an authorized or successful payment can require reversal.",
                 AUTHORIZED, SUCCESS);
+    }
+
+    /** The provider confirmed the reversal; any captured money not already refunded went back. */
+    public PaymentState markReversed() {
+        return markReversed(null);
+    }
+
+    /**
+     * The provider confirmed the reversal and reports how much it returned. That can be less than what is
+     * unrefunded here: a refund the provider already applied may still be on its way to us, and it is
+     * recorded when it arrives. More than that, or a negative amount, contradicts our records.
+     *
+     * @param returnedByProvider the amount the provider reports, or null when it does not say
+     */
+    public PaymentState markReversed(BigDecimal returnedByProvider) {
+        BigDecimal unrefunded = isCaptured() ? amount.subtract(refundedAmount) : Money.zero(currency);
+        BigDecimal returned = returnedByProvider == null ? unrefunded : returnedByProvider;
+        if (returned.signum() < 0 || returned.compareTo(unrefunded) > 0) {
+            throw new IllegalStateException("Provider reports reversing " + returned.toPlainString() + " " + currency
+                    + " of payment " + id + ", but only " + unrefunded.toPlainString() + " is unrefunded here.");
+        }
+        PaymentState previousState = transitionTo(REVERSED, "Only a payment awaiting reversal can be marked reversed.",
+                REVERSAL_REQUIRED);
+        this.reversedAmount = Money.normalize(returned, currency);
+        return previousState;
     }
 
     public PaymentState settle() {
@@ -107,25 +150,36 @@ public class PaymentIntent {
         return transitionTo(RECONCILED, "Only a settled payment can be reconciled.", SETTLED);
     }
 
-    public PaymentState requestRefund() {
-        return transitionTo(REFUND_REQUESTED, "Only successful or settled payments can request a refund.",
-                SUCCESS, SETTLED);
+    public boolean canRequestRefund() {
+        return REFUNDABLE.contains(state) && refundedAmount.compareTo(amount) < 0;
     }
 
-    /** A refund on a reconciled payment, allowed only after an operator approved it in manual review. */
-    public PaymentState requestReviewedRefund() {
-        return transitionTo(REFUND_REQUESTED, "Only a reconciled payment needs a reviewed refund.", RECONCILED);
-    }
-
-    public PaymentState refund() {
-        return transitionTo(REFUNDED, "Refund must be requested first.", REFUND_REQUESTED);
+    /**
+     * Records a refund the provider confirmed. Money already moved, so this never fails on lifecycle
+     * state; a full refund of a captured, unheld payment makes it REFUNDED.
+     *
+     * @return the previous state if the state changed, otherwise null
+     */
+    public PaymentState recordRefund(BigDecimal refunded) {
+        BigDecimal total = refundedAmount.add(refunded);
+        if (total.add(reversedAmount).compareTo(amount) > 0) {
+            throw new IllegalStateException("Refunds would exceed the payment amount for " + id);
+        }
+        refundedAmount = Money.normalize(total, currency);
+        updatedAt = Instant.now();
+        if (refundedAmount.compareTo(amount) == 0 && REFUNDABLE.contains(state)) {
+            PaymentState previousState = state;
+            state = REFUNDED;
+            return previousState;
+        }
+        return null;
     }
 
     public boolean canBeHeldForReview() {
         return HOLDABLE.contains(state);
     }
 
-    /** Puts an in-flight payment on hold. Terminal outcomes (failed, refunded, ...) are facts and are never overwritten. */
+    /** Puts a payment on hold. Terminal outcomes (failed, refunded, reversed, ...) are facts and are never overwritten. */
     public PaymentState holdForReview() {
         if (!canBeHeldForReview()) {
             throw new InvalidStateTransitionException(
@@ -164,12 +218,16 @@ public class PaymentIntent {
         return leaveReview(REVERSAL_REQUIRED);
     }
 
+    public void markProviderChecked(Instant checkedAt) {
+        this.lastProviderCheckAt = checkedAt;
+    }
+
     public boolean isOnHold() {
         return state == MANUAL_REVIEW;
     }
 
-    public boolean hasCaptured() {
-        return CAPTURED.contains(state);
+    public boolean isCaptured() {
+        return capturedAt != null;
     }
 
     public boolean canFailFromReview() {
@@ -216,11 +274,15 @@ public class PaymentIntent {
     public Long getVersion() { return version; }
     public String getMerchantId() { return merchantId; }
     public String getMerchantReference() { return merchantReference; }
-    public BigDecimal getAmount() { return amount; }
+    public BigDecimal getAmount() { return Money.atScale(amount, currency); }
     public String getCurrency() { return currency; }
     public String getIdempotencyKey() { return idempotencyKey; }
     public PaymentState getState() { return state; }
     public PaymentState getStateBeforeReview() { return stateBeforeReview; }
+    public Instant getCapturedAt() { return capturedAt; }
+    public BigDecimal getRefundedAmount() { return Money.atScale(refundedAmount, currency); }
+    public BigDecimal getReversedAmount() { return Money.atScale(reversedAmount, currency); }
+    public Instant getLastProviderCheckAt() { return lastProviderCheckAt; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 }
