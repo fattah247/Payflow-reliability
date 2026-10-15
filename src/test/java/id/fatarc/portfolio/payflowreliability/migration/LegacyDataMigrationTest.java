@@ -1,6 +1,8 @@
 package id.fatarc.portfolio.payflowreliability.migration;
 
 import id.fatarc.portfolio.payflowreliability.audit.AuditHash;
+import id.fatarc.portfolio.payflowreliability.payment.PaymentIntent;
+import id.fatarc.portfolio.payflowreliability.refund.RefundRequest;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -162,7 +164,7 @@ class LegacyDataMigrationTest {
 
         var result = flyway("latest").migrate();
         assertThat(result.success).isTrue();
-        assertThat(result.targetSchemaVersion).isEqualTo(postgres ? "4" : "3");
+        assertThat(result.targetSchemaVersion).isEqualTo("6");
 
         assertThat(jdbc.queryForObject("select state from payment_intents where id = ?", String.class, refundRequested))
                 .as("REFUND_REQUESTED is no longer a payment state; the refund itself stays in flight").isEqualTo("SUCCESS");
@@ -192,6 +194,12 @@ class LegacyDataMigrationTest {
         assertThat(jdbc.queryForList("select status from review_cases where reference_id = ? order by created_at",
                 String.class, held.toString())).as("the newer duplicate is closed so the unique index can be built")
                 .containsExactly("OPEN", "RESOLVED");
+
+        assertThat(jdbc.queryForObject("select request_fingerprint from payment_intents where id = ?", String.class, settled))
+                .as("a client retrying a pre-upgrade request is still recognized")
+                .isEqualTo(PaymentIntent.fingerprintOf("ORDER-" + settled, new BigDecimal("100.00"), "IDR"));
+        assertThat(jdbc.queryForObject("select request_fingerprint from refund_requests where id = ?", String.class, pendingRefund))
+                .isEqualTo(RefundRequest.fingerprintOf(refundRequested, new BigDecimal("50.00"), "customer"));
 
         assertAuditChainsVerify();
     }

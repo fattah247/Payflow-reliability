@@ -131,7 +131,7 @@ public class PaymentIntentService {
 
     private PaymentIntent replay(PaymentIntent intent, CreatePaymentIntentRequest request, String idempotencyKey,
                                  Caller caller) {
-        if (!intent.matchesRequest(request.merchantReference(), request.amount(), request.currency())) {
+        if (!intent.matchesFingerprint(PaymentIntent.fingerprintOf(request.merchantReference(), request.amount(), request.currency()))) {
             throw new BusinessException(ErrorCode.IDEMPOTENCY_KEY_REUSED,
                     "Idempotency key " + idempotencyKey + " was already used for a different request payload.");
         }

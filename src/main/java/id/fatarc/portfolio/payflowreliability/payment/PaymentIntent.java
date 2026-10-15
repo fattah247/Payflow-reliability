@@ -2,11 +2,14 @@ package id.fatarc.portfolio.payflowreliability.payment;
 
 import id.fatarc.portfolio.payflowreliability.common.InvalidStateTransitionException;
 import id.fatarc.portfolio.payflowreliability.common.Money;
+import id.fatarc.portfolio.payflowreliability.idempotency.RequestFingerprint;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -42,6 +45,10 @@ public class PaymentIntent {
 
     @Column(nullable = false)
     private String idempotencyKey;
+
+    /** Canonical hash of the creating request; a retry under the same key must match it (see RequestFingerprint). */
+    @Column(nullable = false, length = 64)
+    private String requestFingerprint;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
@@ -81,6 +88,7 @@ public class PaymentIntent {
         this.amount = Money.normalize(amount, currency);
         this.currency = currency;
         this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = fingerprintOf(merchantReference, amount, currency);
         this.state = CREATED;
         this.refundedAmount = Money.zero(currency);
         this.reversedAmount = Money.zero(currency);
@@ -238,10 +246,21 @@ public class PaymentIntent {
         return isOnHold() && REVERSIBLE.contains(stateBeforeReview);
     }
 
-    public boolean matchesRequest(String merchantReference, BigDecimal amount, String currency) {
-        return this.merchantReference.equals(merchantReference)
-                && this.amount.compareTo(amount) == 0
-                && this.currency.equals(currency);
+    /**
+     * The fingerprint of a payment creation request. Only business fields count: a retry may carry other
+     * per-attempt data (headers, request ids) and still be the same request.
+     */
+    public static String fingerprintOf(String merchantReference, BigDecimal amount, String currency) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("merchantReference", merchantReference);
+        fields.put("amount", amount);
+        fields.put("currency", currency);
+        return RequestFingerprint.of("payment-intents.create", fields);
+    }
+
+    /** Whether a retry under this payment's idempotency key is the same request that created it. */
+    public boolean matchesFingerprint(String fingerprint) {
+        return requestFingerprint.equals(fingerprint);
     }
 
     private void requireOnHold() {
@@ -277,6 +296,7 @@ public class PaymentIntent {
     public BigDecimal getAmount() { return Money.atScale(amount, currency); }
     public String getCurrency() { return currency; }
     public String getIdempotencyKey() { return idempotencyKey; }
+    public String getRequestFingerprint() { return requestFingerprint; }
     public PaymentState getState() { return state; }
     public PaymentState getStateBeforeReview() { return stateBeforeReview; }
     public Instant getCapturedAt() { return capturedAt; }

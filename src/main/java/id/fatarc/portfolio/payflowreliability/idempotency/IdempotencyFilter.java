@@ -1,7 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.idempotency;
 
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
-import id.fatarc.portfolio.payflowreliability.common.Hashing;
 import id.fatarc.portfolio.payflowreliability.security.ApiErrorWriter;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import jakarta.servlet.FilterChain;
@@ -17,7 +16,6 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +25,10 @@ import java.util.regex.Pattern;
 /**
  * Optional {@code Idempotency-Key} for every mutating API call: the first response is stored and
  * replayed (with {@code Idempotent-Replayed: true}) for retries of the same request.
+ *
+ * <p>A retry is recognized by its canonical fingerprint ({@link RequestFingerprint#ofHttp}): the same JSON
+ * with keys in another order, other whitespace or {@code 1000} instead of {@code 1000.00} is the same request.
+ * A key names one operation; using it for a different method, path, query or body is refused (422).
  *
  * <p>Not applied to payment and refund creation, whose keys are part of the stored records and
  * are required, nor to merchant onboarding, whose responses contain API keys that must not be stored.
@@ -74,7 +76,7 @@ public class IdempotencyFilter extends OncePerRequestFilter {
 
         byte[] body = request.getInputStream().readAllBytes();
         String target = request.getRequestURI() + (request.getQueryString() == null ? "" : "?" + request.getQueryString());
-        String requestHash = hash(request.getMethod(), target, body);
+        String requestHash = RequestFingerprint.ofHttp(request.getMethod(), request.getRequestURI(), request.getQueryString(), body);
 
         switch (service.begin(caller.name(), key, request.getMethod(), target, requestHash)) {
             case IdempotencyService.Reject reject -> errorWriter.write(response, reject.code(), reject.message());
@@ -119,13 +121,6 @@ public class IdempotencyFilter extends OncePerRequestFilter {
         if (record.getResponseBody() != null) {
             response.getOutputStream().write(record.getResponseBody().getBytes(StandardCharsets.UTF_8));
         }
-    }
-
-    private static String hash(String method, String target, byte[] body) {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        buffer.writeBytes((method + "\n" + target + "\n").getBytes(StandardCharsets.UTF_8));
-        buffer.writeBytes(body);
-        return Hashing.sha256Hex(buffer.toByteArray());
     }
 
     private static final class CachedBodyRequest extends HttpServletRequestWrapper {

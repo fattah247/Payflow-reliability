@@ -75,7 +75,7 @@ public class RefundService {
         var existing = refundRequestRepository.findByPaymentIntentIdAndIdempotencyKey(paymentIntentId, idempotencyKey);
         if (existing.isPresent()) {
             RefundRequest refund = existing.get();
-            if (!refund.matches(request.amount(), request.reason())) {
+            if (!refund.matchesFingerprint(RefundRequest.fingerprintOf(paymentIntentId, request.amount(), request.reason()))) {
                 throw new BusinessException(ErrorCode.IDEMPOTENCY_KEY_REUSED,
                         "Idempotency key " + idempotencyKey + " was already used for refund " + refund.getId()
                                 + " with a different amount or reason.");
