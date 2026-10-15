@@ -8,6 +8,7 @@ import id.fatarc.portfolio.payflowreliability.payment.PaymentTransaction;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentTransactionRepository;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerService;
 import id.fatarc.portfolio.payflowreliability.provider.PaymentProviderClient;
+import id.fatarc.portfolio.payflowreliability.provider.ProviderProperties;
 import id.fatarc.portfolio.payflowreliability.provider.ProviderResult;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequest;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequestRepository;
@@ -51,7 +52,14 @@ import java.util.concurrent.ThreadLocalRandom;
  *   <li>Records the result in one transaction with the domain change and the ledger journal, locking the
  *       payment first (the global lock order). If recording fails, that counts as an attempt too, so a
  *       result that cannot be recorded escalates instead of looping.</li>
+ *   <li>Never resends under a key the provider may have forgotten: once the first dispatch is older than the
+ *       provider's key retention (minus a margin), it only looks the key up, and escalates if the provider
+ *       no longer knows it.</li>
  * </ul>
+ *
+ * The idempotency key is the command's, derived once from the business operation when the command was
+ * created ({@code refund-<refundId>}, {@code reversal-<paymentId>}), never per attempt: that is what lets a
+ * worker that died after the provider acted be replaced by another that sends the very same request.
  */
 @Component
 public class OutboxWorker {
@@ -67,6 +75,7 @@ public class OutboxWorker {
     private final ReviewService reviewService;
     private final AuditService auditService;
     private final PaymentProviderClient providerClient;
+    private final Duration keyResendWindow;
     private final MeterRegistry meterRegistry;
     private final Clock clock;
     private final TransactionTemplate transactions;
@@ -87,6 +96,7 @@ public class OutboxWorker {
                         ReviewService reviewService,
                         AuditService auditService,
                         PaymentProviderClient providerClient,
+                        ProviderProperties providerProperties,
                         MeterRegistry meterRegistry,
                         Clock clock,
                         PlatformTransactionManager transactionManager,
@@ -105,6 +115,7 @@ public class OutboxWorker {
         this.reviewService = reviewService;
         this.auditService = auditService;
         this.providerClient = providerClient;
+        this.keyResendWindow = providerProperties.keyResendWindow();
         this.meterRegistry = meterRegistry;
         this.clock = clock;
         this.transactions = new TransactionTemplate(transactionManager);
@@ -144,9 +155,10 @@ public class OutboxWorker {
         if (call == null) {
             return;
         }
-        ProviderResult result = execute(call);
+        Attempt attempt = execute(call);
+        ProviderResult result = attempt.result();
         try {
-            transactions.executeWithoutResult(status -> record(call, result));
+            transactions.executeWithoutResult(status -> record(call, attempt));
         } catch (RuntimeException ex) {
             log.error("Outbox command {}: provider answered {} but recording it failed", id, result, ex);
             afterFailure(id, "Provider answered " + result + " but recording it failed: " + ex.getMessage());
@@ -205,9 +217,11 @@ public class OutboxWorker {
         }
 
         command.markDispatched(providerTransactionId.get(), now);
+        boolean lookupOnly = previouslyDispatched && command.getDispatchedAt().isBefore(now.minus(keyResendWindow));
         return new Call(id, command.getCommandType(), intent.getId(), refund == null ? null : refund.getId(),
                 command.getIdempotencyKey(), command.getProviderTransactionId(),
-                refund == null ? null : refund.getAmount(), intent.getCurrency(), previouslyDispatched);
+                refund == null ? null : refund.getAmount(), intent.getCurrency(), previouslyDispatched,
+                lookupOnly, command.getDispatchedAt());
     }
 
     /** The transaction the payment was made with: the first one recorded. Later rows (a chargeback) are not it. */
@@ -217,15 +231,24 @@ public class OutboxWorker {
                 .map(PaymentTransaction::getProviderTransactionId);
     }
 
-    private ProviderResult execute(Call call) {
+    private Attempt execute(Call call) {
         try {
             boolean mayHaveBeenApplied = call.previouslyDispatched();
             if (call.previouslyDispatched()) {
                 Optional<ProviderResult> earlier = call.type() == CommandType.REFUND
                         ? providerClient.findRefund(call.idempotencyKey())
                         : providerClient.findReversal(call.idempotencyKey());
-                if (earlier.isPresent() && !(earlier.get() instanceof ProviderResult.Unknown)) {
-                    return earlier.get();
+                if (earlier.isPresent()) {
+                    if (!(earlier.get() instanceof ProviderResult.Unknown) || call.lookupOnly()) {
+                        return new Attempt(earlier.get(), false);
+                    }
+                }
+                if (call.lookupOnly()) {
+                    return new Attempt(new ProviderResult.Unknown("First sent at " + call.dispatchedAt() + ", longer ago than the "
+                            + "provider keeps idempotency keys; it no longer recognizes " + call.idempotencyKey()
+                            + ". It may never have received the call, or it may have forgotten the key: a resend could be "
+                            + "applied twice. Check the provider's records for transaction " + call.providerTransactionId() + "."),
+                            true);
                 }
                 // Empty: the provider never received an earlier attempt, so this send is the first it sees.
                 mayHaveBeenApplied = earlier.isPresent();
@@ -236,16 +259,17 @@ public class OutboxWorker {
                     : providerClient.reverse(call.idempotencyKey(), call.providerTransactionId(),
                     call.paymentIntentId().toString());
             if (mayHaveBeenApplied && result instanceof ProviderResult.Rejected rejected && !rejected.operationFailed()) {
-                return new ProviderResult.Unknown("Provider refused the resent request (" + rejected.reason()
-                        + "), but an earlier attempt may have been applied.");
+                return new Attempt(new ProviderResult.Unknown("Provider refused the resent request (" + rejected.reason()
+                        + "), but an earlier attempt may have been applied."), false);
             }
-            return result;
+            return new Attempt(result, false);
         } catch (RuntimeException ex) {
-            return new ProviderResult.Unknown("Provider call failed: " + ex.getMessage());
+            return new Attempt(new ProviderResult.Unknown("Provider call failed: " + ex.getMessage()), false);
         }
     }
 
-    private void record(Call call, ProviderResult result) {
+    private void record(Call call, Attempt attempt) {
+        ProviderResult result = attempt.result();
         Instant now = clock.instant();
         PaymentIntent intent = paymentIntentRepository.findForUpdate(call.paymentIntentId()).orElseThrow();
         OutboxCommand command = commandRepository.findById(call.commandId()).orElseThrow();
@@ -291,7 +315,7 @@ public class OutboxWorker {
                 yield "rejected";
             }
             case ProviderResult.Unknown unknown -> {
-                if (command.getAttempts() >= maxAttempts) {
+                if (command.getAttempts() >= maxAttempts || attempt.escalateNow()) {
                     escalate(command, intent, unknown.reason(), now);
                     yield "escalated";
                 }
@@ -350,7 +374,17 @@ public class OutboxWorker {
         return Duration.ofMillis(half + (half == 0 ? 0 : ThreadLocalRandom.current().nextLong(half + 1)));
     }
 
+    /**
+     * @param escalateNow no further attempt can be made safely (the provider no longer knows the key)
+     */
+    private record Attempt(ProviderResult result, boolean escalateNow) {
+    }
+
+    /**
+     * @param lookupOnly the first dispatch is older than the provider's key retention: ask, never resend
+     */
     private record Call(UUID commandId, CommandType type, UUID paymentIntentId, UUID refundId, String idempotencyKey,
-                        String providerTransactionId, BigDecimal amount, String currency, boolean previouslyDispatched) {
+                        String providerTransactionId, BigDecimal amount, String currency, boolean previouslyDispatched,
+                        boolean lookupOnly, Instant dispatchedAt) {
     }
 }

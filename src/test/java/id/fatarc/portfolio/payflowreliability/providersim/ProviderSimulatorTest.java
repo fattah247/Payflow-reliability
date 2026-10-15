@@ -10,6 +10,7 @@ import id.fatarc.portfolio.payflowreliability.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -102,5 +103,23 @@ class ProviderSimulatorTest extends IntegrationTest {
         mockMvc.perform(get("/provider-sim/v1/refunds/sim-key-1").header("Authorization", "Bearer " + PROVIDER_KEY))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SUCCEEDED"));
+    }
+
+    @Test
+    void shouldForgetIdempotencyKeysAfterTheRetentionPeriodLikeARealProvider() {
+        PaymentIntent intent = paidIntent("ORDER-P-KEY", "50000");
+        String tx = transactionOf(intent).getProviderTransactionId();
+        SimOperation first = providerSimulator.refund("key-p", "hash-p", tx, new BigDecimal("10000"), "IDR", false);
+
+        assertThat(providerSimulator.refund("key-p", "hash-p", tx, new BigDecimal("10000"), "IDR", false).getId())
+                .as("within the retention period the key is deduplicated").isEqualTo(first.getId());
+
+        clock.advance(Duration.ofHours(25));
+        assertThat(providerSimulator.find(SimOperation.Type.REFUND, "key-p")).as("the key is forgotten").isEmpty();
+        SimOperation second = providerSimulator.refund("key-p", "hash-p", tx, new BigDecimal("10000"), "IDR", false);
+
+        // Why the platform never resends a call first dispatched longer ago than this: it would be a new refund.
+        assertThat(second.getId()).isNotEqualTo(first.getId());
+        assertThat(providerSimulator.payment(intent.getId()).orElseThrow().getRefundedAmount()).isEqualByComparingTo("20000");
     }
 }

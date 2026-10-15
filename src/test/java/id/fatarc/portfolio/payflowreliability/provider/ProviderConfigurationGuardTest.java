@@ -8,7 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ProviderConfigurationGuardTest {
     private static ProviderProperties provider(String baseUrl, String apiKey, String... secrets) {
-        return new ProviderProperties(baseUrl, apiKey, List.of(secrets), null, null, null);
+        return new ProviderProperties(baseUrl, apiKey, List.of(secrets), null, null, null, null);
     }
 
     @Test

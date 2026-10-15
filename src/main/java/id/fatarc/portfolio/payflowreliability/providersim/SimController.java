@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * The provider's HTTP API (as a real provider would expose it) plus simulation controls for what
@@ -25,13 +26,15 @@ public class SimController {
     private final SimWebhookDispatcher dispatcher;
     private final SimFaults faults;
     private final SimulatorProperties properties;
+    private final SimRequestLog requestLog;
 
     public SimController(ProviderSimulator simulator, SimWebhookDispatcher dispatcher, SimFaults faults,
-                         SimulatorProperties properties) {
+                         SimulatorProperties properties, SimRequestLog requestLog) {
         this.simulator = simulator;
         this.dispatcher = dispatcher;
         this.faults = faults;
         this.properties = properties;
+        this.requestLog = requestLog;
     }
 
     public record CustomerAction(BigDecimal amount, String currency, Boolean deliverWebhook, Integer deliveries,
@@ -120,11 +123,11 @@ public class SimController {
         authenticate(authorization);
         requireKey(idempotencyKey);
         SimFaults.Mode fault = faults.next(SimFaults.Operation.REFUND);
-        unavailableIf(fault);
         String hash = Hashing.sha256Hex("refund|" + call.providerTransactionId() + "|" + call.amount().stripTrailingZeros().toPlainString()
                 + "|" + call.currency() + "|" + call.reference());
-        SimOperation operation = simulator.refund(idempotencyKey, hash, call.providerTransactionId(), call.amount(),
-                call.currency(), fault == SimFaults.Mode.REJECT);
+        unavailableIf(fault, "REFUND", idempotencyKey, hash);
+        SimOperation operation = logged("REFUND", idempotencyKey, hash, () -> simulator.refund(idempotencyKey, hash,
+                call.providerTransactionId(), call.amount(), call.currency(), fault == SimFaults.Mode.REJECT));
         lateIf(fault);
         return ResponseEntity.status(HttpStatus.CREATED).body(view(operation));
     }
@@ -146,10 +149,10 @@ public class SimController {
         authenticate(authorization);
         requireKey(idempotencyKey);
         SimFaults.Mode fault = faults.next(SimFaults.Operation.REVERSAL);
-        unavailableIf(fault);
         String hash = Hashing.sha256Hex("reversal|" + call.providerTransactionId() + "|" + call.reference());
-        SimOperation operation = simulator.reverse(idempotencyKey, hash, call.providerTransactionId(),
-                fault == SimFaults.Mode.REJECT);
+        unavailableIf(fault, "REVERSAL", idempotencyKey, hash);
+        SimOperation operation = logged("REVERSAL", idempotencyKey, hash, () -> simulator.reverse(idempotencyKey, hash,
+                call.providerTransactionId(), fault == SimFaults.Mode.REJECT));
         lateIf(fault);
         return ResponseEntity.status(HttpStatus.CREATED).body(view(operation));
     }
@@ -190,10 +193,27 @@ public class SimController {
         }
     }
 
-    private static void unavailableIf(SimFaults.Mode fault) {
+    private void unavailableIf(SimFaults.Mode fault, String operation, String idempotencyKey, String hash) {
         if (fault == SimFaults.Mode.UNAVAILABLE) {
+            requestLog.record(operation, idempotencyKey, hash, SimApiRequest.Outcome.UNAVAILABLE);
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Simulated outage");
         }
+    }
+
+    /** Runs a money-moving operation and records in the provider's request log what happened to its key. */
+    private SimOperation logged(String operation, String idempotencyKey, String hash, Supplier<SimOperation> action) {
+        SimOperation result;
+        try {
+            result = action.get();
+        } catch (ResponseStatusException ex) {
+            if (ex.getStatusCode().value() == HttpStatus.UNPROCESSABLE_ENTITY.value()) {
+                requestLog.record(operation, idempotencyKey, hash, SimApiRequest.Outcome.KEY_CONFLICT);
+            }
+            throw ex;
+        }
+        requestLog.record(operation, idempotencyKey, hash, result.wasReplayed() ? SimApiRequest.Outcome.REPLAYED
+                : result.getStatus() == SimOperation.Status.FAILED ? SimApiRequest.Outcome.REFUSED : SimApiRequest.Outcome.APPLIED);
+        return result;
     }
 
     /** The operation is committed; answering late makes the caller time out without knowing it succeeded. */

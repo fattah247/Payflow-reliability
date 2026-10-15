@@ -47,6 +47,10 @@ public class SimOperation {
     @Column(nullable = false)
     private Instant createdAt;
 
+    /** Set when this result answers a repeated key rather than a new operation; not stored. */
+    @Transient
+    private boolean replayed;
+
     protected SimOperation() {
     }
 
@@ -64,6 +68,20 @@ public class SimOperation {
         this.createdAt = now;
     }
 
+    SimOperation asReplay() {
+        replayed = true;
+        return this;
+    }
+
+    /**
+     * The provider keeps idempotency keys for a limited time. After that the key is free again: a request
+     * carrying it is treated as new. The operation itself stays in the provider's records.
+     */
+    void forgetKey() {
+        idempotencyKey = idempotencyKey + "~forgotten~" + id;
+    }
+
+    public boolean wasReplayed() { return replayed; }
     public UUID getId() { return id; }
     public Type getOperationType() { return operationType; }
     public String getIdempotencyKey() { return idempotencyKey; }

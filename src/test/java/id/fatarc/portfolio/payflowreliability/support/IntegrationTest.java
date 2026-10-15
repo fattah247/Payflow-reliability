@@ -18,6 +18,7 @@ import id.fatarc.portfolio.payflowreliability.payment.*;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.ProviderWebhookRequest;
 import id.fatarc.portfolio.payflowreliability.providersim.ProviderSimulator;
+import id.fatarc.portfolio.payflowreliability.providersim.SimApiRequestRepository;
 import id.fatarc.portfolio.payflowreliability.providersim.SimFaults;
 import id.fatarc.portfolio.payflowreliability.providersim.SimOperationRepository;
 import id.fatarc.portfolio.payflowreliability.providersim.SimWebhookDispatcher;
@@ -69,7 +70,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
-@Import(TestClockConfig.class)
+@Import({TestClockConfig.class, TestProviderClientConfig.class})
 public abstract class IntegrationTest {
     protected static final String MERCHANT_A = "merchant-a";
     protected static final String MERCHANT_B = "merchant-b";
@@ -85,7 +86,7 @@ public abstract class IntegrationTest {
     private static final List<String> TABLES = List.of("settlement_batch_items", "settlement_batches", "ledger_postings",
             "ledger_journals", "outbox_commands", "provider_events", "refund_requests", "review_cases",
             "payment_transactions", "audit_events", "idempotency_records", "payment_intents", "merchant_api_keys",
-            "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments");
+            "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments", "sim_api_requests");
 
     @Autowired protected MockMvc mockMvc;
     @Autowired protected ObjectMapper objectMapper;
@@ -117,6 +118,8 @@ public abstract class IntegrationTest {
     @Autowired protected SimWebhookDispatcher webhookDispatcher;
     @Autowired protected SimOperationRepository simOperationRepository;
     @Autowired protected SimFaults simFaults;
+    @Autowired protected SimApiRequestRepository simApiRequestRepository;
+    @Autowired protected CrashableProviderClient providerClient;
 
     protected String merchantAKey;
     protected String merchantBKey;
@@ -125,6 +128,7 @@ public abstract class IntegrationTest {
     void resetWorld() {
         clock.reset();
         simFaults.clear();
+        providerClient.reset();
         truncateAll();
         merchantAKey = merchantService.register(new RegisterMerchantRequest(MERCHANT_A, "Merchant A"), OPS_ANA).apiKey().apiKey();
         merchantBKey = merchantService.register(new RegisterMerchantRequest(MERCHANT_B, "Merchant B"), OPS_ANA).apiKey().apiKey();

@@ -29,14 +29,17 @@ public class ProviderSimulator {
     private final SimOperationRepository operations;
     private final SimWebhookDeliveryRepository deliveries;
     private final ObjectMapper objectMapper;
+    private final SimulatorProperties properties;
     private final Clock clock;
 
     public ProviderSimulator(SimPaymentRepository payments, SimOperationRepository operations,
-                             SimWebhookDeliveryRepository deliveries, ObjectMapper objectMapper, Clock clock) {
+                             SimWebhookDeliveryRepository deliveries, ObjectMapper objectMapper,
+                             SimulatorProperties properties, Clock clock) {
         this.payments = payments;
         this.operations = operations;
         this.deliveries = deliveries;
         this.objectMapper = objectMapper;
+        this.properties = properties;
         this.clock = clock;
     }
 
@@ -165,9 +168,10 @@ public class ProviderSimulator {
                 refusal == null ? SimOperation.Status.SUCCEEDED : SimOperation.Status.FAILED, refusal, now));
     }
 
-    @Transactional(readOnly = true)
+    /** Looks an operation up by idempotency key; a key older than the retention period is no longer known. */
+    @Transactional
     public Optional<SimOperation> find(SimOperation.Type type, String idempotencyKey) {
-        return operations.findByOperationTypeAndIdempotencyKey(type, idempotencyKey);
+        return remembered(type, idempotencyKey);
     }
 
     @Transactional(readOnly = true)
@@ -181,13 +185,23 @@ public class ProviderSimulator {
     }
 
     private Optional<SimOperation> earlier(SimOperation.Type type, String idempotencyKey, String requestHash) {
-        return operations.findByOperationTypeAndIdempotencyKey(type, idempotencyKey).map(existing -> {
+        return remembered(type, idempotencyKey).map(existing -> {
             if (!existing.getRequestHash().equals(requestHash)) {
                 throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
                         "Idempotency-Key " + idempotencyKey + " was used for a different request.");
             }
-            return existing;
+            return existing.asReplay();
         });
+    }
+
+    private Optional<SimOperation> remembered(SimOperation.Type type, String idempotencyKey) {
+        Optional<SimOperation> existing = operations.findByOperationTypeAndIdempotencyKey(type, idempotencyKey);
+        if (existing.isPresent() && existing.get().getCreatedAt().isBefore(clock.instant().minus(properties.keyRetention()))) {
+            existing.get().forgetKey();
+            operations.saveAndFlush(existing.get());
+            return Optional.empty();
+        }
+        return existing;
     }
 
     private SimPayment create(UUID paymentIntentId, BigDecimal amount, String currency, SimPayment.Status status) {
