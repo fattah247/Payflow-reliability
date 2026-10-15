@@ -33,6 +33,17 @@ keys are scoped per caller and forgotten after 24 hours.
 
 Proof: `IdempotencyFilterTest`
 
+### A retry that was serialized differently
+
+What happened: an operator tool retries with the same `Idempotency-Key`, but its JSON library writes the keys
+in another order and `1000.00` instead of `1000`.
+
+Expected: recognized as the same request (canonical fingerprint) and replayed; a different amount under the same
+key, or the same key on another endpoint, is 422 `IDEMPOTENCY_KEY_REUSED`. Payment keys still replay after 30
+days; refund keys are scoped to their payment.
+
+Proof: `IdempotencyKeyRulesTest`, `RequestFingerprintTest`
+
 ### Unauthenticated, cross-merchant and over-privileged calls
 
 Expected: no key is 401; another merchant's payment or refund is 404; a merchant on an operator
@@ -180,6 +191,30 @@ Expected: dispatch is committed before the call leaves, so the refund can no lon
 worker finds the refund by its key and records it once.
 
 Proof: `OutboxRecoveryTest.shouldNeverCancelARefundTheProviderMayAlreadyHave`
+
+### The worker dies right after the provider refunded (real crash)
+
+What happened: the worker's thread dies between the provider's answer and our commit.
+
+Expected: the next worker, after the lease expires, sends the same key (`refund-<refundId>`), the provider
+answers with its stored result, and the refund is recorded once. The provider's own request log shows a single
+key and one applied operation.
+
+Proof: `OutboundIdempotencyKeyTest.shouldResendTheSameKeyAfterAWorkerDiesOnceTheProviderActed`,
+`shouldSendEveryAttemptUnderTheSameKey`
+
+### The provider has forgotten the key
+
+What happened: a call first sent more than a day ago is still unresolved, and the provider prunes idempotency
+keys after 24 hours. It now answers "unknown key", which could mean "never received" or "forgot".
+
+Why it matters: a resend under the forgotten key is a new refund.
+
+Expected: past `payflow.provider.key-resend-window` (23 h) the worker only looks the key up and never resends;
+an unknown key escalates for a person to check the provider's records. The customer is refunded once.
+
+Proof: `OutboundIdempotencyKeyTest.shouldNeverResendUnderAKeyTheProviderMayHaveForgotten`,
+`ProviderSimulatorTest.shouldForgetIdempotencyKeysAfterTheRetentionPeriodLikeARealProvider`
 
 ### A lookup fails after an unknown outcome
 
