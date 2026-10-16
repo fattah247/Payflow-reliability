@@ -444,6 +444,55 @@ cancelled checkout and someone has to return it).
 
 Proof: `CheckoutSloTest.shouldSendACaptureForACancelledCheckoutToReviewInsteadOfTakingTheMoney`
 
+## Device risk (what the gate stops, what it costs)
+
+The labelled customers in these tests are simulated (`RiskTrafficGenerator`, seed 42): device profiles, amounts,
+fraud share and step-up completion are model parameters, documented in ADR 028, not observed fraud.
+
+### A rooted phone, a lying device
+
+What happened: the app reports a high-severity signal (for example `root_package`) and claims its own level is LOW.
+
+Expected: the server recomputes the level from the signals, blocks (`SEVERE_SIGNAL`), records both levels, and
+never starts the payment: no provider page, no provider call, no outbox command. Starting it fails with
+`422 PAYMENT_BLOCKED`. It counts in money at risk as blocked today.
+
+Proof: `DeviceRiskFlowTest.shouldBlockForGoodAndNeverHandTheBlockedPaymentToTheProvider`,
+`DeviceRiskPolicyTest.shouldNeverTrustTheLevelTheDeviceReportsForItself`
+
+### A step-up nobody confirms
+
+Expected: the payment waits in REQUIRES_CONFIRMATION (starting it fails with `409 STEP_UP_REQUIRED`) and counts as
+money awaiting confirmation. The wrong method, or an operator, cannot confirm it. With the right method it starts
+like any other; without, the sweeper expires it after the confirmation timeout, still never having reached the
+provider. A cancelled step-up is recorded as abandoned friction.
+
+Proof: `DeviceRiskFlowTest.shouldHoldASteppedUpPaymentUntilTheCustomerConfirms`,
+`shouldExpireAStepUpNobodyConfirmedWithoutEverReachingTheProvider`, `shouldRecordACancelledStepUpAsAbandonedFriction`
+
+### A retry with cleaned evidence
+
+What happened: the shop retries the blocked request with the same idempotency key, this time with no signals.
+
+Expected: the same payment, still BLOCKED; the decision is taken once. Changing what is bought under the same key is
+a different request (`422 IDEMPOTENCY_KEY_REUSED`).
+
+Proof: `DeviceRiskFlowTest.shouldAnswerARetryWithTheFirstDecisionWhateverEvidenceItCarries`
+
+### The provider charges a blocked or unconfirmed payment anyway
+
+Expected: the capture is never applied; it goes to review, and no capture journal is posted.
+
+Proof: `DeviceRiskFlowTest.shouldSendACaptureForABlockedOrUnconfirmedPaymentToReviewInsteadOfApplyingIt`
+
+### Is the gate worth it?
+
+Expected: from its own decisions and the labels learned afterwards, the payment system reports fraud stopped, fraud
+loss, honest money lost to friction, precision and recall, each equal to the simulation's ground truth to the
+rupiah. Moving the step-up threshold up lowers friction and raises fraud loss, never the other way round.
+
+Proof: `RiskReportTest`
+
 ## Operations and evidence
 
 ### Books that disagree with operations
