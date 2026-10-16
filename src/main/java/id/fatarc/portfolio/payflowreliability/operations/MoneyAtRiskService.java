@@ -3,6 +3,7 @@ package id.fatarc.portfolio.payflowreliability.operations;
 import id.fatarc.portfolio.payflowreliability.checkout.CheckoutProperties;
 import id.fatarc.portfolio.payflowreliability.common.Money;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.TypedQuery;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -74,27 +75,33 @@ public class MoneyAtRiskService {
         this.abandonmentWindow = abandonmentWindow;
     }
 
-    @Transactional(readOnly = true)
     public MoneyAtRisk compute() {
+        return compute(null);
+    }
+
+    /**
+     * @param merchantId one merchant's money only (breaks: those about the merchant's payouts); null for everything
+     */
+    @Transactional(readOnly = true)
+    public MoneyAtRisk compute(String merchantId) {
         Instant now = clock.instant();
+        String ofMerchant = merchantId == null ? "" : " and p.merchantId = :merchantId";
         List<Item> items = new ArrayList<>();
 
-        List<Object[]> pending = entityManager.createQuery("""
+        List<Object[]> pending = query("""
                 select p.currency, count(p), sum(p.amount) from PaymentIntent p
                 where p.state in (id.fatarc.portfolio.payflowreliability.payment.PaymentState.PENDING,
                                   id.fatarc.portfolio.payflowreliability.payment.PaymentState.AUTHORIZED)
-                  and p.startedAt < :startedBefore
-                group by p.currency""", Object[].class)
+                  and p.startedAt < :startedBefore""" + ofMerchant + " group by p.currency", merchantId)
                 .setParameter("startedBefore", now.minus(checkout.confirmationSlo())).getResultList();
         items.add(item(Kind.PENDING_BEYOND_SLA, "Payments waiting for the provider's confirmation longer than the "
                 + checkout.confirmationSlo().toSeconds() + " s SLO", pending, null));
 
-        List<Object[]> abandoned = entityManager.createQuery("""
+        List<Object[]> abandoned = query("""
                 select p.currency, count(p), sum(p.amount) from PaymentIntent p
                 where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.CANCELLED
                   and p.cancellationReason = id.fatarc.portfolio.payflowreliability.payment.CancellationReason.ABANDONED
-                  and p.cancelledAt >= :since
-                group by p.currency""", Object[].class)
+                  and p.cancelledAt >= :since""" + ofMerchant + " group by p.currency", merchantId)
                 .setParameter("since", now.minus(abandonmentWindow)).getResultList();
         items.add(item(Kind.ABANDONED, "Checkouts abandoned in the last " + abandonmentWindow.toMinutes() + " minutes",
                 abandoned, abandonmentWindow));
@@ -102,10 +109,11 @@ public class MoneyAtRiskService {
         // Several captured payments for one merchant reference: every charge after the first is a duplicate.
         List<Object[]> duplicates = new ArrayList<>();
         Map<String, Object[]> byCurrency = new TreeMap<>();
-        for (Object[] row : entityManager.createQuery("""
+        for (Object[] row : query("""
                 select p.merchantId, p.merchantReference, p.currency, count(p), sum(p.amount), min(p.amount)
-                from PaymentIntent p where p.capturedAt is not null
-                group by p.merchantId, p.merchantReference, p.currency having count(p) > 1""", Object[].class).getResultList()) {
+                from PaymentIntent p where p.capturedAt is not null""" + ofMerchant + """
+
+                group by p.merchantId, p.merchantReference, p.currency having count(p) > 1""", merchantId).getResultList()) {
             Object[] total = byCurrency.computeIfAbsent((String) row[2], currency -> new Object[]{currency, 0L, BigDecimal.ZERO});
             total[1] = (Long) total[1] + ((Long) row[3] - 1);
             total[2] = ((BigDecimal) total[2]).add(((BigDecimal) row[4]).subtract((BigDecimal) row[5]));
@@ -113,44 +121,49 @@ public class MoneyAtRiskService {
         duplicates.addAll(byCurrency.values());
         items.add(item(Kind.DUPLICATE_CHARGES, "Extra charges for a merchant reference already charged", duplicates, null));
 
-        items.add(item(Kind.HELD_FOR_REVIEW, "Payments held for manual review", entityManager.createQuery("""
+        items.add(item(Kind.HELD_FOR_REVIEW, "Payments held for manual review", query("""
                 select p.currency, count(p), sum(p.amount) from PaymentIntent p
-                where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.MANUAL_REVIEW
-                group by p.currency""", Object[].class).getResultList(), null));
+                where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.MANUAL_REVIEW"""
+                + ofMerchant + " group by p.currency", merchantId).getResultList(), null));
 
         // Breaks by age. A break about a whole statement carries no amount; it still counts.
         items.add(breaks(Kind.BREAKS_OPEN_UNDER_1_DAY, "Open reconciliation breaks, under a day old",
-                now.minus(Duration.ofDays(1)), now.plusNanos(1)));
+                now.minus(Duration.ofDays(1)), now.plusNanos(1), merchantId));
         items.add(breaks(Kind.BREAKS_OPEN_1_TO_3_DAYS, "Open reconciliation breaks, one to three days old",
-                now.minus(Duration.ofDays(3)), now.minus(Duration.ofDays(1))));
+                now.minus(Duration.ofDays(3)), now.minus(Duration.ofDays(1)), merchantId));
         items.add(breaks(Kind.BREAKS_OPEN_OVER_3_DAYS, "Open reconciliation breaks, over three days old",
-                Instant.EPOCH, now.minus(Duration.ofDays(3))));
+                Instant.EPOCH, now.minus(Duration.ofDays(3)), merchantId));
 
-        items.add(item(Kind.AWAITING_CONFIRMATION, "Payments waiting for a device-risk step-up confirmation",
-                entityManager.createQuery("""
-                        select p.currency, count(p), sum(p.amount) from PaymentIntent p
-                        where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.REQUIRES_CONFIRMATION
-                        group by p.currency""", Object[].class).getResultList(), null));
+        items.add(item(Kind.AWAITING_CONFIRMATION, "Payments waiting for a device-risk step-up confirmation", query("""
+                select p.currency, count(p), sum(p.amount) from PaymentIntent p
+                where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.REQUIRES_CONFIRMATION"""
+                + ofMerchant + " group by p.currency", merchantId).getResultList(), null));
         Instant startOfDay = LocalDate.ofInstant(now, ZoneId.systemDefault()).atStartOfDay(ZoneId.systemDefault()).toInstant();
-        items.add(item(Kind.BLOCKED_TODAY, "Payments blocked by device risk today", entityManager.createQuery("""
-                        select d.currency, count(d), sum(d.amount) from RiskDecision d
-                        where d.decision = id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType.BLOCK and d.decidedAt >= :since
-                        group by d.currency""", Object[].class).setParameter("since", startOfDay).getResultList(), null));
+        items.add(item(Kind.BLOCKED_TODAY, "Payments blocked by device risk today", query("""
+                select d.currency, count(d), sum(d.amount) from RiskDecision d
+                where d.decision = id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType.BLOCK and d.decidedAt >= :since"""
+                + (merchantId == null ? "" : " and d.merchantId = :merchantId") + " group by d.currency", merchantId)
+                .setParameter("since", startOfDay).getResultList(), null));
         return new MoneyAtRisk(now, List.copyOf(items));
     }
 
-    /** Open breaks opened in [{@code from}, {@code before}). */
-    private Item breaks(Kind kind, String description, Instant from, Instant before) {
-        long count = entityManager.createQuery("""
-                select count(b) from ReconciliationBreak b
+    private TypedQuery<Object[]> query(String jpql, String merchantId) {
+        TypedQuery<Object[]> query = entityManager.createQuery(jpql, Object[].class);
+        return merchantId == null ? query : query.setParameter("merchantId", merchantId);
+    }
+
+    /** Open breaks opened in [{@code from}, {@code before}), optionally only those about one merchant's payouts. */
+    private Item breaks(Kind kind, String description, Instant from, Instant before, String merchantId) {
+        String where = """
                 where b.status = id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus.OPEN
-                  and b.openedAt >= :from and b.openedAt < :before""", Long.class)
-                .setParameter("from", from).setParameter("before", before).getSingleResult();
-        List<Object[]> amounts = entityManager.createQuery("""
-                select b.currency, count(b), sum(b.amount) from ReconciliationBreak b
-                where b.status = id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus.OPEN
-                  and b.openedAt >= :from and b.openedAt < :before and b.amount is not null
-                group by b.currency""", Object[].class)
+                  and b.openedAt >= :from and b.openedAt < :before""" + (merchantId == null ? "" : """
+
+                  and exists (select 1 from SettlementBatch s where s.id = b.settlementBatchId and s.merchantId = :merchantId)""");
+        TypedQuery<Long> counted = entityManager.createQuery("select count(b) from ReconciliationBreak b " + where,
+                Long.class).setParameter("from", from).setParameter("before", before);
+        long count = (merchantId == null ? counted : counted.setParameter("merchantId", merchantId)).getSingleResult();
+        List<Object[]> amounts = query("select b.currency, count(b), sum(b.amount) from ReconciliationBreak b " + where
+                + " and b.amount is not null group by b.currency", merchantId)
                 .setParameter("from", from).setParameter("before", before).getResultList();
         Item item = item(kind, description, amounts, null);
         return new Item(kind, description, count, item.amount(), null);

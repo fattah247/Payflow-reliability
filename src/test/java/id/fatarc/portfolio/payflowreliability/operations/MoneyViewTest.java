@@ -91,6 +91,11 @@ class MoneyViewTest extends IntegrationTest {
                 .andExpect(jsonPath("$.moneyAtRisk.items.length()").value(MoneyAtRiskService.Kind.values().length))
                 .andExpect(jsonPath("$.moneyAtRisk.items[?(@.kind=='HELD_FOR_REVIEW')].amount.IDR").value(4000.0))
                 .andExpect(jsonPath("$.moneyAtRisk.items[?(@.kind=='BREAKS_OPEN_UNDER_1_DAY')].count").value(1));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/operations/money-at-risk").param("merchantId", MERCHANT_B)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[?(@.count > 0)]").isEmpty());
+        assertThat(moneyAtRiskService.compute(MERCHANT_A).get(MoneyAtRiskService.Kind.BREAKS_OPEN_UNDER_1_DAY).count())
+                .as("the missing credit is about merchant A's payout").isEqualTo(1);
         operationalMetrics.refresh();
         assertThat(gauge("payflow.money.at.risk.count", MoneyAtRiskService.Kind.HELD_FOR_REVIEW)).isEqualTo(1);
         assertThat(gauge("payflow.money.at.risk.count", MoneyAtRiskService.Kind.AWAITING_CONFIRMATION)).isEqualTo(1);

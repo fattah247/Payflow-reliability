@@ -78,6 +78,8 @@ class RiskReportTest extends IntegrationTest {
                 of(truth.fraudBy(), CONFIRMED).count() + of(truth.legitimateBy(), CONFIRMED).count(),
                 of(truth.fraudBy(), CONFIRMED).amount().add(of(truth.legitimateBy(), CONFIRMED).amount())), "step-ups confirmed");
         assertThat(measured.stepUpAwaiting().count()).as("every unconfirmed step-up expired").isZero();
+        assertThat(reportService.report("IDR", MERCHANT_A).fraudLoss()).as("all of it is merchant A's").isEqualTo(measured.fraudLoss());
+        assertThat(reportService.report("IDR", MERCHANT_B).decided().count()).isZero();
 
         long fraudFlagged = of(truth.fraudBy(), BLOCKED, CONFIRMED, NOT_CONFIRMED).count();
         long flagged = fraudFlagged + of(truth.legitimateBy(), BLOCKED, CONFIRMED, NOT_CONFIRMED).count();
@@ -122,8 +124,10 @@ class RiskReportTest extends IntegrationTest {
         assertThat(last.fraudLoss()).as("the trade is real, not flat").isGreaterThan(first.fraudLoss());
         assertThat(last.legitimateLostToFriction()).isLessThan(first.legitimateLostToFriction());
 
-        mockMvc.perform(as(OPS_ANA_KEY, get("/api/risk/threshold-sweep").param("parameter", "BLOCK").param("from", "3").param("to", "8")))
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/risk/threshold-sweep").param("parameter", "BLOCK").param("from", "3").param("to", "8")
+                        .param("merchantId", MERCHANT_A)))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.rows.length()").value(6))
+                .andExpect(jsonPath("$.merchantId").value(MERCHANT_A))
                 .andExpect(jsonPath("$.rows[2].current").value(true));
     }
 

@@ -13,12 +13,20 @@ public class OperationsController {
     private final OperationsService operationsService;
     private final PaymentStatusSweeper sweeper;
     private final MoneyInvariantService moneyInvariantService;
+    private final MoneyAtRiskService moneyAtRiskService;
 
     public OperationsController(OperationsService operationsService, PaymentStatusSweeper sweeper,
-                                MoneyInvariantService moneyInvariantService) {
+                                MoneyInvariantService moneyInvariantService, MoneyAtRiskService moneyAtRiskService) {
         this.operationsService = operationsService;
         this.sweeper = sweeper;
         this.moneyInvariantService = moneyInvariantService;
+        this.moneyAtRiskService = moneyAtRiskService;
+    }
+
+    /** Money at risk now, by kind, as counts and amounts; for one merchant when {@code merchantId} is given. */
+    @GetMapping("/api/operations/money-at-risk")
+    public MoneyAtRiskService.MoneyAtRisk moneyAtRisk(@RequestParam(required = false) String merchantId) {
+        return moneyAtRiskService.compute(merchantId);
     }
 
     /** Checks every money rule now, in one snapshot, with the evidence of each violation. */

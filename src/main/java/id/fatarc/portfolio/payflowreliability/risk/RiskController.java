@@ -54,18 +54,20 @@ public class RiskController {
     }
 
     @GetMapping("/report")
-    public RiskReportService.Report report(@RequestParam(defaultValue = "IDR") String currency) {
-        return reportService.report(currency);
+    public RiskReportService.Report report(@RequestParam(defaultValue = "IDR") String currency,
+                                           @RequestParam(required = false) String merchantId) {
+        return reportService.report(currency, merchantId);
     }
 
     /** Moves one threshold through a range and shows what each value would trade: friction against fraud loss. */
     @GetMapping("/threshold-sweep")
     public RiskReportService.Sweep sweep(@RequestParam(defaultValue = "STEP_UP") RiskReportService.Parameter parameter,
                                          @RequestParam(defaultValue = "1") int from, @RequestParam(defaultValue = "7") int to,
-                                         @RequestParam(defaultValue = "IDR") String currency) {
+                                         @RequestParam(defaultValue = "IDR") String currency,
+                                         @RequestParam(required = false) String merchantId) {
         if (from < 0 || to < from || to - from > 20) {
             throw new BusinessException(ErrorCode.VALIDATION_FAILED, "from and to must satisfy 0 <= from <= to <= from + 20.");
         }
-        return reportService.sweep(parameter, from, to, currency);
+        return reportService.sweep(parameter, from, to, currency, merchantId);
     }
 }

@@ -62,7 +62,7 @@ public class RiskReportService {
      * @param recall            flagged and fraud / fraud; null when no fraud is labelled
      * @param recallByAmount    fraud amount stopped / fraud amount
      */
-    public record Report(String currency, RiskPolicy.Thresholds thresholds, Tally decided, Tally allowed, Tally steppedUp,
+    public record Report(String currency, String merchantId, RiskPolicy.Thresholds thresholds, Tally decided, Tally allowed, Tally steppedUp,
                          Tally stepUpConfirmed, Tally stepUpAbandoned, Tally stepUpAwaiting, Tally blocked,
                          List<RuleRow> byRule, Tally labelled, Tally fraud, Tally legitimate, Tally fraudStopped,
                          Tally fraudLoss, Tally legitimateLostToFriction, Tally legitimateSteppedUp, Double precision,
@@ -78,15 +78,20 @@ public class RiskReportService {
                            Double precision, Double recall, boolean current) {
     }
 
-    public record Sweep(String parameter, String currency, long labelledDecisions, double legitimateConfirmRate,
+    public record Sweep(String parameter, String currency, String merchantId, long labelledDecisions, double legitimateConfirmRate,
                         double fraudulentConfirmRate, String confirmRateSource, List<SweepRow> rows, String note) {
     }
 
     public enum Parameter { STEP_UP, BLOCK }
 
-    @Transactional(readOnly = true)
     public Report report(String currency) {
-        List<RiskDecision> all = decisions.findAll().stream().filter(d -> d.getCurrency().equals(currency)).toList();
+        return report(currency, null);
+    }
+
+    /** @param merchantId one merchant's decisions only; null for all */
+    @Transactional(readOnly = true)
+    public Report report(String currency, String merchantId) {
+        List<RiskDecision> all = decisions(currency, merchantId);
         Tally decided = Tally.zero(), allowed = Tally.zero(), steppedUp = Tally.zero(), confirmed = Tally.zero(),
                 abandoned = Tally.zero(), awaiting = Tally.zero(), blocked = Tally.zero(), labelled = Tally.zero(),
                 fraud = Tally.zero(), legitimate = Tally.zero(), stopped = Tally.zero(), loss = Tally.zero(),
@@ -135,7 +140,7 @@ public class RiskReportService {
                 legitimateSteppedUp = d.getDecision() == RiskDecisionType.REQUIRE_CONFIRMATION ? legitimateSteppedUp.plus(amount) : legitimateSteppedUp;
             }
         }
-        return new Report(currency, policy.configured(), scaled(decided, currency), scaled(allowed, currency),
+        return new Report(currency, merchantId, policy.configured(), scaled(decided, currency), scaled(allowed, currency),
                 scaled(steppedUp, currency), scaled(confirmed, currency), scaled(abandoned, currency), scaled(awaiting, currency),
                 scaled(blocked, currency), new ArrayList<>(rules.values()), scaled(labelled, currency), scaled(fraud, currency),
                 scaled(legitimate, currency), scaled(stopped, currency), scaled(loss, currency), scaled(friction, currency),
@@ -148,11 +153,14 @@ public class RiskReportService {
                         : "Every decision is labelled. Outside a simulation, blocked payments are rarely labelled.");
     }
 
-    /** Re-decides every labelled payment with one threshold moved from {@code from} to {@code to}. */
-    @Transactional(readOnly = true)
     public Sweep sweep(Parameter parameter, int from, int to, String currency) {
-        List<RiskDecision> labelled = decisions.findAll().stream()
-                .filter(d -> d.getCurrency().equals(currency) && d.getLabel() != null).toList();
+        return sweep(parameter, from, to, currency, null);
+    }
+
+    /** Re-decides every labelled payment (of one merchant, or all) with one threshold moved from {@code from} to {@code to}. */
+    @Transactional(readOnly = true)
+    public Sweep sweep(Parameter parameter, int from, int to, String currency, String merchantId) {
+        List<RiskDecision> labelled = decisions(currency, merchantId).stream().filter(d -> d.getLabel() != null).toList();
         Map<RiskLabel, long[]> observed = new EnumMap<>(RiskLabel.class);
         for (RiskDecision d : labelled) {
             if (d.getDecision() == RiskDecisionType.REQUIRE_CONFIRMATION && d.getOutcome() != RiskOutcome.AWAITING_CONFIRMATION) {
@@ -214,9 +222,15 @@ public class RiskReportService {
                     money(friction, currency), legitimateSteppedUp, flagged == 0 ? null : round((double) flaggedFraud / flagged),
                     fraudCount == 0 ? null : round((double) flaggedFraud / fraudCount), current));
         }
-        return new Sweep(parameter.name(), currency, labelled.size(), round(legitimateRate), round(fraudRate), source, rows,
+        return new Sweep(parameter.name(), currency, merchantId, labelled.size(), round(legitimateRate), round(fraudRate), source, rows,
                 "Counterfactual: each labelled payment re-decided from its stored points. A step-up it never had is valued at the "
                         + "confirmation rate for its label, so those amounts are expected values.");
+    }
+
+    private List<RiskDecision> decisions(String currency, String merchantId) {
+        return decisions.findAll().stream()
+                .filter(d -> d.getCurrency().equals(currency) && (merchantId == null || d.getMerchantId().equals(merchantId)))
+                .toList();
     }
 
     private static double rate(long[] counts, double assumed) {
