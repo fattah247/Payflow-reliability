@@ -4,17 +4,27 @@ import id.fatarc.portfolio.payflowreliability.bank.BankStatementRepository;
 import id.fatarc.portfolio.payflowreliability.banksim.BankFaults;
 import id.fatarc.portfolio.payflowreliability.banksim.BankSimStatement;
 import id.fatarc.portfolio.payflowreliability.operations.MoneyInvariantService;
+import id.fatarc.portfolio.payflowreliability.payment.CancellationReason;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentIntent;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.providersim.ProviderSimulator;
 import id.fatarc.portfolio.payflowreliability.providersim.SimFaults;
+import id.fatarc.portfolio.payflowreliability.providersim.SimLatency;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakAction;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakCategory;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakResolutionService;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.ReconciliationBreak;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.ResolveBreakRequest;
 import id.fatarc.portfolio.payflowreliability.refund.dto.CreateRefundRequest;
+import id.fatarc.portfolio.payflowreliability.risk.RiskAction;
+import id.fatarc.portfolio.payflowreliability.risk.RiskDecision;
+import id.fatarc.portfolio.payflowreliability.risk.RiskDecisionRepository;
+import id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType;
+import id.fatarc.portfolio.payflowreliability.risk.RiskEvidence;
+import id.fatarc.portfolio.payflowreliability.risk.RiskOutcome;
+import id.fatarc.portfolio.payflowreliability.risk.SignalSeverity;
+import id.fatarc.portfolio.payflowreliability.risk.SignalSource;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import id.fatarc.portfolio.payflowreliability.settlement.PayoutStatus;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatch;
@@ -49,7 +59,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * reordered webhooks, status sweeps, partial refunds with provider outages, commit-then-timeout and refusals,
  * workers that crash right after the provider acted, racing settlement runs, chargebacks before and after payout,
  * every bank fault, statements re-imported or arriving out of order, the provider's report, operators assigning
- * unmatched credits, and time passing.
+ * unmatched credits, a provider that turns slow (webhooks held back while it stays up) and shops that give up on
+ * a checkout, device-risk decisions (step-ups confirmed or left to expire, blocks, a provider that charges a blocked
+ * or unconfirmed payment anyway), and time passing.
  */
 @JqwikSpringSupport
 class MoneyInvariantPropertyTest extends IntegrationTest {
@@ -61,22 +73,36 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
     private BankStatementRepository bankStatementRepository;
     @Autowired
     private BreakResolutionService breakResolutionService;
+    @Autowired
+    private RiskDecisionRepository riskDecisionRepository;
 
     private final List<PaymentIntent> payments = new ArrayList<>();
     private int sequence;
     private boolean crashed;
     private boolean crashPending;
     private boolean reissued;
+    private boolean rogueCharge;
+    private boolean slowed;
     private final List<Integer> deferredReissues = new ArrayList<>();
 
     // ---- the alphabet -----------------------------------------------------------------------------
 
-    sealed interface Action permits Create, Pay, Deliver, Sweep, Refund, RunOutbox, Settle, Chargeback, BankFault,
-            CloseDays, ImportStatements, Reimport, Reissue, ProviderReport, ThreeWay, AssignUnmatched, Wait {
+    sealed interface Action permits Create, RiskyCreate, Pay, Deliver, Sweep, Refund, RunOutbox, Settle, Chargeback,
+            BankFault, CloseDays, ImportStatements, Reimport, Reissue, ProviderReport, ThreeWay, AssignUnmatched, Slow,
+            Abandon, Wait {
     }
+
+    /** What the customer's device reports: nothing wrong, enough for a step-up, or a high-severity signal. */
+    enum Device { CLEAN, STEP_UP, BLOCK }
 
     /** A checkout: created once, retried {@code retries} times under the same key. */
     record Create(int merchant, int amount, int retries) implements Action { }
+
+    /**
+     * A checkout with device evidence. A step-up is confirmed or left to expire; with {@code rogue} the provider
+     * charges the payment anyway while it is blocked or unconfirmed (a stale page, a misbehaving integration).
+     */
+    record RiskyCreate(int merchant, int amount, Device device, boolean confirm, boolean rogue) implements Action { }
 
     record Pay(int payment, int duplicates, boolean lost, boolean authorizeFirst) implements Action { }
 
@@ -110,6 +136,12 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
 
     record AssignUnmatched() implements Action { }
 
+    /** The provider turns slow (its webhooks held back while it stays up), or recovers. */
+    record Slow(boolean on) implements Action { }
+
+    /** The shop gives up on a checkout still waiting for its result, perhaps after the customer already paid. */
+    record Abandon(int payment) implements Action { }
+
     record Wait(int minutes) implements Action { }
 
     @Provide
@@ -118,6 +150,10 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
         Arbitrary<Action> action = Arbitraries.frequencyOf(
                 Tuple.of(14, Combinators.combine(Arbitraries.integers().between(0, 1), Arbitraries.integers().between(1, 40),
                         Arbitraries.integers().between(0, 2)).as((m, a, r) -> (Action) new Create(m, a * 500, r))),
+                Tuple.of(7, Combinators.combine(Arbitraries.integers().between(0, 1), Arbitraries.integers().between(1, 40),
+                        Arbitraries.of(Device.CLEAN, Device.STEP_UP, Device.STEP_UP, Device.BLOCK), Arbitraries.of(true, true, false),
+                        Arbitraries.of(false, false, false, true))
+                        .as((m, a, d, c, r) -> (Action) new RiskyCreate(m, a * 500, d, c, r))),
                 Tuple.of(12, Combinators.combine(index, Arbitraries.integers().between(0, 2), Arbitraries.of(false, false, true),
                         Arbitraries.of(false, true)).as((p, d, l, auth) -> (Action) new Pay(p, d, l, auth))),
                 Tuple.of(6, Arbitraries.just((Action) new Deliver())),
@@ -138,6 +174,8 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
                 Tuple.of(3, Arbitraries.just((Action) new ProviderReport())),
                 Tuple.of(3, Arbitraries.just((Action) new ThreeWay())),
                 Tuple.of(2, Arbitraries.just((Action) new AssignUnmatched())),
+                Tuple.of(3, Arbitraries.of(true, false).map(on -> (Action) new Slow(on))),
+                Tuple.of(2, index.map(p -> (Action) new Abandon(p))),
                 Tuple.of(2, Arbitraries.integers().between(1, 180).map(minutes -> (Action) new Wait(minutes))));
         return action.list().ofMinSize(20).ofMaxSize(60);
     }
@@ -150,6 +188,8 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
         crashed = false;
         crashPending = false;
         reissued = false;
+        rogueCharge = false;
+        slowed = false;
         deferredReissues.clear();
     }
 
@@ -182,6 +222,13 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
         Statistics.label("a payment reconciled three ways").collect(reconciled);
         Statistics.label("a worker crashed after the provider acted").collect(crashed);
         Statistics.label("the bank re-issued a statement").collect(reissued);
+        List<RiskDecision> decisions = riskDecisionRepository.findAll();
+        Statistics.label("a payment was blocked").collect(decisions.stream().anyMatch(d -> d.getDecision() == RiskDecisionType.BLOCK));
+        Statistics.label("a step-up was confirmed and captured").collect(decisions.stream()
+                .anyMatch(d -> d.getOutcome() == RiskOutcome.CONFIRMED && paymentIntentRepository.findById(d.getPaymentIntentId())
+                        .map(PaymentIntent::isCaptured).orElse(false)));
+        Statistics.label("the provider charged a blocked or unconfirmed payment").collect(rogueCharge);
+        Statistics.label("the provider was slow").collect(slowed);
         breakRepository.findAll().stream().map(ReconciliationBreak::getCategory).distinct()
                 .forEach(category -> Statistics.label("break categories").collect(category));
 
@@ -191,6 +238,10 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
         Statistics.label("a payment reconciled three ways").coverage(coverage -> coverage.check(true).count(count -> count >= 1));
         Statistics.label("a worker crashed after the provider acted").coverage(coverage -> coverage.check(true).count(count -> count >= 3));
         Statistics.label("the bank re-issued a statement").coverage(coverage -> coverage.check(true).count(count -> count >= 3));
+        Statistics.label("a payment was blocked").coverage(coverage -> coverage.check(true).count(count -> count >= 10));
+        Statistics.label("a step-up was confirmed and captured").coverage(coverage -> coverage.check(true).count(count -> count >= 3));
+        Statistics.label("the provider charged a blocked or unconfirmed payment").coverage(coverage -> coverage.check(true).count(count -> count >= 5));
+        Statistics.label("the provider was slow").coverage(coverage -> coverage.check(true).count(count -> count >= 10));
     }
 
     // ---- what each action does --------------------------------------------------------------------
@@ -199,6 +250,7 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
         try {
             switch (action) {
                 case Create create -> create(create);
+                case RiskyCreate create -> riskyCreate(create);
                 case Pay pay -> pay(pay);
                 case Deliver ignored -> deliverWebhooks();
                 case Sweep ignored -> sweeper.runOnce(Duration.ZERO);
@@ -215,6 +267,8 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
                 case ProviderReport ignored -> providerReport();
                 case ThreeWay ignored -> threeWayReconciliationService.run(OPS_ANA.name());
                 case AssignUnmatched ignored -> assignUnmatched();
+                case Slow slow -> slow(slow.on());
+                case Abandon abandon -> abandon(abandon.payment());
                 case Wait wait -> clock.advance(Duration.ofMinutes(wait.minutes()));
             }
         } catch (CrashableProviderClient.SimulatedCrash crash) {
@@ -236,6 +290,54 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
             intent = paymentIntentService.create(request, "checkout-" + reference, Caller.merchant(merchant)).intent();
         }
         payments.add(paymentIntentService.start(intent.getId(), Caller.merchant(merchant)));
+    }
+
+    private void riskyCreate(RiskyCreate create) {
+        String merchant = MERCHANTS[create.merchant()];
+        String reference = "PROP-" + sequence;
+        List<RiskEvidence.Signal> signals = switch (create.device()) {
+            case CLEAN -> List.of();
+            case STEP_UP -> List.of(new RiskEvidence.Signal("emulator_fingerprint", "EMULATOR", SignalSeverity.MEDIUM, SignalSource.DEVICE_CHECK));
+            case BLOCK -> List.of(new RiskEvidence.Signal("root_su_path", "ROOT", SignalSeverity.HIGH, SignalSource.DEVICE_CHECK));
+        };
+        PaymentIntent intent = paymentIntentService.create(new CreatePaymentIntentRequest(null, reference,
+                new BigDecimal(create.amount()), "IDR", RiskAction.PHYSICAL_GOODS,
+                new RiskEvidence("device-" + sequence, null, true, sequence % 2 == 0, signals)),
+                "checkout-" + reference, Caller.merchant(merchant)).intent();
+        if (intent.getState() == PaymentState.REQUIRES_CONFIRMATION && create.confirm() && !create.rogue()) {
+            intent = paymentIntentService.confirm(intent.getId(), intent.getRequiredConfirmation(), Caller.merchant(merchant));
+        }
+        if (create.rogue() && intent.getState() != PaymentState.CREATED) {
+            providerSimulator.pay(intent.getId(), intent.getAmount(), "IDR", null);
+            deliverWebhooks();
+            rogueCharge = true;
+        }
+        // The shop tries to start whatever it got back; a hold or a block refuses, and nothing reaches the provider.
+        PaymentIntent started = paymentIntentService.start(intent.getId(), Caller.merchant(merchant));
+        payments.add(started);
+        if (started.getConfirmedAt() != null) {
+            // Having confirmed, the customer goes on to pay.
+            providerSimulator.pay(started.getId(), started.getAmount(), "IDR", null);
+            deliverWebhooks();
+        }
+    }
+
+    private void slow(boolean on) {
+        if (on) {
+            simLatency.slow(new SimLatency.Mode(4000, 7000, true));
+            slowed = true;
+        } else {
+            simLatency.recover();
+        }
+    }
+
+    private void abandon(int index) {
+        List<PaymentIntent> waiting = payments.stream().map(this::reload)
+                .filter(intent -> intent.getState() == PaymentState.PENDING).toList();
+        if (!waiting.isEmpty()) {
+            PaymentIntent intent = waiting.get(index % waiting.size());
+            paymentIntentService.cancel(intent.getId(), CancellationReason.ABANDONED, Caller.merchant(intent.getMerchantId()));
+        }
     }
 
     private PaymentIntent payment(int index) {
@@ -403,6 +505,7 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
     private void settleDown() {
         providerClient.reset();
         simFaults.clear();
+        simLatency.recover();
         deliverWebhooks();
         runOutbox(false);
         drainOutbox();

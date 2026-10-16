@@ -140,7 +140,8 @@ class OperationsTest extends IntegrationTest {
                 .andExpect(jsonPath("$.allHold").value(true))
                 .andExpect(jsonPath("$.rules[*].name", hasItems("BOOKS_BALANCE", "CAPTURE_PAID_OUT_AT_MOST_ONCE",
                         "RECONCILED_ONLY_WITH_A_BANK_LINE", "UNMATCHED_MONEY_HAS_A_BREAK", "BANK_ENTRY_BOOKED_ONCE",
-                        "LANDING_IS_PROVEN", "NO_RETRY_CHARGES_TWICE", "REFUNDED_ONCE", "PAYOUT_SENT_ONCE")))
+                        "LANDING_IS_PROVEN", "BLOCKED_NEVER_REACHES_THE_PROVIDER", "STEP_UP_CONFIRMED_BEFORE_CAPTURE",
+                        "NO_RETRY_CHARGES_TWICE", "REFUNDED_ONCE", "PAYOUT_SENT_ONCE")))
                 .andExpect(jsonPath("$.rules[0].violations", empty()));
 
         // Money that no bank line explains, booked around the import: the books no longer agree with the bank.

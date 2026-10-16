@@ -93,6 +93,33 @@ public class MoneyInvariantService {
                           and not exists (select 1 from ReconciliationBreak r where r.bankLineId = l.id
                               and r.resolution = id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakResolution.ASSIGNED_TO_BATCH)""")));
 
+        rules.add(rule("BLOCKED_NEVER_REACHES_THE_PROVIDER", "A payment device risk blocked is never started, never captured "
+                        + "and never the subject of a provider call.",
+                strings("""
+                        select concat('payment ', cast(p.id as string), ' was blocked (', cast(d.rule as string), ') but is ',
+                                      cast(p.state as string), case when p.startedAt is not null then ', started' else '' end,
+                                      case when p.capturedAt is not null then ', captured' else '' end)
+                        from RiskDecision d, PaymentIntent p
+                        where d.decision = id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType.BLOCK
+                          and p.id = d.paymentIntentId
+                          and (p.state <> id.fatarc.portfolio.payflowreliability.payment.PaymentState.BLOCKED
+                               or p.startedAt is not null or p.capturedAt is not null
+                               or exists (select 1 from OutboxCommand c where c.paymentIntentId = p.id))""")));
+
+        rules.add(rule("STEP_UP_CONFIRMED_BEFORE_CAPTURE", "A payment that needed a step-up is started, and so captured, only "
+                        + "after the customer confirmed it with the required method.",
+                strings("""
+                        select concat('payment ', cast(p.id as string), ' needed ', cast(d.requiredConfirmation as string),
+                                      ' but was ', case when p.capturedAt is not null then 'captured' else 'started' end,
+                                      case when p.confirmedAt is null then ' without a confirmation' else ' before its confirmation' end)
+                        from RiskDecision d, PaymentIntent p
+                        where d.decision = id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType.REQUIRE_CONFIRMATION
+                          and p.id = d.paymentIntentId
+                          and (p.startedAt is not null or p.capturedAt is not null)
+                          and (p.confirmedAt is null or p.startedAt < p.confirmedAt
+                               or p.confirmationMethod is null or p.confirmationMethod <> d.requiredConfirmation
+                               or d.outcome <> id.fatarc.portfolio.payflowreliability.risk.RiskOutcome.CONFIRMED)""")));
+
         if (providerSimulated) {
             rules.add(rule("NO_RETRY_CHARGES_TWICE", "One business operation, one charge: no merchant reference is paid twice "
                             + "at the provider, and no idempotency key is applied twice.",

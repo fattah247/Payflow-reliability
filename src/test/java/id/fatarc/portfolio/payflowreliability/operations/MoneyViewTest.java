@@ -27,11 +27,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * One view of the money at risk, whatever put it there: a held payment, a payout the bank never credited, a step-up
- * nobody answered, a block. Amounts and counts in the summary, the same in the gauges.
+ * nobody answered, a block. Amounts and counts in the summary, the same in the gauges; and the rules that say
+ * device-risk decisions were obeyed find a violation when one exists.
  */
 class MoneyViewTest extends IntegrationTest {
     @Autowired
     private MoneyAtRiskService moneyAtRiskService;
+    @Autowired
+    private MoneyInvariantService moneyInvariantService;
     @Autowired
     private OperationalMetrics operationalMetrics;
     @Autowired
@@ -104,5 +107,38 @@ class MoneyViewTest extends IntegrationTest {
         assertAtRisk(MoneyAtRiskService.Kind.BREAKS_OPEN_OVER_3_DAYS, 1, "2991.00");
         operationalMetrics.refresh();
         assertThat(gauge("payflow.money.at.risk.count", MoneyAtRiskService.Kind.BREAKS_OPEN_OVER_3_DAYS)).isEqualTo(1);
+    }
+
+    private MoneyInvariantService.Rule rule(String name) {
+        return moneyInvariantService.check().rules().stream().filter(rule -> rule.name().equals(name)).findFirst().orElseThrow();
+    }
+
+    @Test
+    void shouldCatchABlockedPaymentThatWasStartedAnyway() {
+        PaymentIntent blocked = create("VIEW-INV-1", "1500", "root_package", SignalSeverity.HIGH);
+        assertThat(rule("BLOCKED_NEVER_REACHES_THE_PROVIDER").holds()).isTrue();
+
+        // What a bug that let the shop start it would leave behind.
+        jdbcTemplate.update("update payment_intents set state = 'PENDING', started_at = ? where id = ?",
+                java.sql.Timestamp.from(clock.instant()), blocked.getId());
+
+        MoneyInvariantService.Rule rule = rule("BLOCKED_NEVER_REACHES_THE_PROVIDER");
+        assertThat(rule.holds()).isFalse();
+        assertThat(rule.violations()).singleElement().asString()
+                .contains(blocked.getId().toString(), "SEVERE_SIGNAL", "PENDING", "started");
+    }
+
+    @Test
+    void shouldCatchAStepUpStartedWithoutItsConfirmation() {
+        PaymentIntent stepUp = create("VIEW-INV-2", "2500", "test_keys", SignalSeverity.MEDIUM);
+        assertThat(rule("STEP_UP_CONFIRMED_BEFORE_CAPTURE").holds()).isTrue();
+
+        jdbcTemplate.update("update payment_intents set state = 'PENDING', started_at = ? where id = ?",
+                java.sql.Timestamp.from(clock.instant()), stepUp.getId());
+
+        MoneyInvariantService.Rule rule = rule("STEP_UP_CONFIRMED_BEFORE_CAPTURE");
+        assertThat(rule.holds()).isFalse();
+        assertThat(rule.violations()).singleElement().asString()
+                .contains(stepUp.getId().toString(), "STEP_UP_KEY", "started without a confirmation");
     }
 }

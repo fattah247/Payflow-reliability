@@ -22,6 +22,8 @@ that must hold whatever happened, each with the evidence of every violation:
 | `UNMATCHED_MONEY_HAS_A_BREAK` | every bank line in suspense has an open break saying why |
 | `BANK_ENTRY_BOOKED_ONCE` | the bank's own entry reference is booked once, however often it is delivered |
 | `LANDING_IS_PROVEN` | every landed payout carries its reference, or a named operator assigned it |
+| `BLOCKED_NEVER_REACHES_THE_PROVIDER` | a payment device risk blocked is never started, never captured, never the subject of a provider call (ADR 028) |
+| `STEP_UP_CONFIRMED_BEFORE_CAPTURE` | a payment that needed a step-up is started, and so captured, only after it was confirmed with the required method |
 | `NO_RETRY_CHARGES_TWICE` | no merchant reference is charged twice; no idempotency key is applied twice at the provider |
 | `REFUNDED_ONCE` | what the provider refunded equals what we recorded plus refunds still in flight |
 | `PAYOUT_SENT_ONCE` | the provider paid each batch out at most once |
@@ -39,7 +41,11 @@ application (real transactions, the provider and bank simulators over real HTTP,
 - outbox runs where the worker dies right after the provider acted;
 - racing settlement runs; chargebacks before and after payout;
 - every bank fault; statements imported twice, in reverse order, or re-issued by the bank under a new number;
-- the provider's settlement report; operators assigning unmatched credits; hours passing.
+- the provider's settlement report; operators assigning unmatched credits; hours passing;
+- the provider turning slow (webhooks held back while it stays up) and recovering; shops abandoning checkouts,
+  sometimes after the customer already paid;
+- device-risk decisions: clean devices, step-ups confirmed (and paid) or left to expire, blocks, and a provider
+  that charges a blocked or unconfirmed payment anyway.
 
 After each sequence the system settles down (webhooks delivered, provider calls run, an end-of-day settlement,
 the bank closed through two days past every payout's window, the provider's report imported, the reconciliation
@@ -51,14 +57,16 @@ breaks a rule and prints the seed to replay it.
 A property that only ever walks the happy path proves nothing, and the first version of this test did exactly
 that: only one sequence in fifty landed a payout. So the test now collects statistics on every run (payouts
 landed, payouts broken, money in suspense, payments reconciled three ways, workers crashed, statements re-issued,
-break categories reached) and fails if the sequences did not reach those states often enough.
+payments blocked, step-ups confirmed and captured, rogue provider charges, slow periods, break categories reached)
+and fails if the sequences did not reach those states often enough.
 
 ### 4. Every rule is mutation-checked
 
 Each rule was broken on purpose and the suite (this test included) had to fail: matching a credit by amount when
 the reference is missing, skipping the fee lines when a payout lands, accepting a re-imported statement, scoping a
-bank line's identity to its statement, regenerating the outbound idempotency key per attempt. The results are in
-the README.
+bank line's identity to its statement, regenerating the outbound idempotency key per attempt, letting a step-up
+payment through unconfirmed (the decision recorded but not enforced, or the start guard removed), and sending a
+blocked payment. The results are in the README.
 
 ## Alternatives considered
 
