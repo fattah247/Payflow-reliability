@@ -13,14 +13,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** Operator view of the device-risk gate: decisions and the labels learned since. */
+/** Operator view of the device-risk gate: decisions, labels learned since, and what the gate costs and saves. */
 @RestController
 @RequestMapping("/api/risk")
 public class RiskController {
     private final RiskService riskService;
+    private final RiskReportService reportService;
 
-    public RiskController(RiskService riskService) {
+    public RiskController(RiskService riskService, RiskReportService reportService) {
         this.riskService = riskService;
+        this.reportService = reportService;
     }
 
     public record Outcome(@NotNull UUID paymentIntentId, @NotNull RiskLabel label, @NotNull RiskLabel.Source source) {
@@ -49,5 +51,21 @@ public class RiskController {
     @PostMapping("/expire-unconfirmed")
     public Map<String, Integer> expireUnconfirmed(@RequestParam(required = false) Long olderThanSeconds) {
         return Map.of("expired", riskService.expireUnconfirmed(olderThanSeconds == null ? null : Duration.ofSeconds(Math.max(0, olderThanSeconds))));
+    }
+
+    @GetMapping("/report")
+    public RiskReportService.Report report(@RequestParam(defaultValue = "IDR") String currency) {
+        return reportService.report(currency);
+    }
+
+    /** Moves one threshold through a range and shows what each value would trade: friction against fraud loss. */
+    @GetMapping("/threshold-sweep")
+    public RiskReportService.Sweep sweep(@RequestParam(defaultValue = "STEP_UP") RiskReportService.Parameter parameter,
+                                         @RequestParam(defaultValue = "1") int from, @RequestParam(defaultValue = "7") int to,
+                                         @RequestParam(defaultValue = "IDR") String currency) {
+        if (from < 0 || to < from || to - from > 20) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED, "from and to must satisfy 0 <= from <= to <= from + 20.");
+        }
+        return reportService.sweep(parameter, from, to, currency);
     }
 }

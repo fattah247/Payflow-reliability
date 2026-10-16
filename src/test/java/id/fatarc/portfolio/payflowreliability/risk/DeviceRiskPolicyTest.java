@@ -27,9 +27,9 @@ class DeviceRiskPolicyTest {
             signal("installer_source_unknown", "INSTALLER", SignalSeverity.LOW));
 
     private static final RiskPolicy DEVICE_ONLY = new RiskPolicy(new RiskPolicyProperties(2, 5, true, List.of(),
-            Map.of(), 0, null));
+            Map.of(), 0, null, null, null));
     private static final RiskPolicy DEFAULT = new RiskPolicy(new RiskPolicyProperties(null, null, null, null, null,
-            null, null));
+            null, null, null, null));
 
     private static RiskEvidence.Signal signal(String id, String category, SignalSeverity severity) {
         return new RiskEvidence.Signal(id, category, severity, SignalSource.DEVICE_CHECK);
@@ -128,7 +128,7 @@ class DeviceRiskPolicyTest {
         assertThat(serverToServer.decision()).isEqualTo(RiskDecisionType.ALLOW);
         assertThat(serverToServer.deviceLevel()).isNull();
 
-        RiskPolicy strict = new RiskPolicy(new RiskPolicyProperties(null, null, null, null, null, 2, null));
+        RiskPolicy strict = new RiskPolicy(new RiskPolicyProperties(null, null, null, null, null, 2, null, null, null));
         RiskPolicy.Outcome outcome = strict.decide(null, new BigDecimal("100000"), "IDR", RiskAction.PHYSICAL_GOODS);
         assertThat(outcome.points().missingEvidence()).isEqualTo(2);
         assertThat(outcome.decision()).isEqualTo(RiskDecisionType.REQUIRE_CONFIRMATION);
@@ -137,7 +137,7 @@ class DeviceRiskPolicyTest {
 
     @Test
     void shouldLetASevereSignalCountAsPointsWhenTheHardBlockIsSwitchedOff() {
-        RiskPolicy pointsOnly = new RiskPolicy(new RiskPolicyProperties(null, null, false, null, null, null, null));
+        RiskPolicy pointsOnly = new RiskPolicy(new RiskPolicyProperties(null, null, false, null, null, null, null, null, null));
         RiskPolicy.Outcome outcome = pointsOnly.decide(evidence(true, APP_SIGNALS.get(5)), new BigDecimal("100000"), "IDR",
                 RiskAction.PHYSICAL_GOODS);
 
