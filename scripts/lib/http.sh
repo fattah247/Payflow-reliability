@@ -7,6 +7,7 @@ BASE_URL="${BASE_URL:-http://localhost:8080}"
 OPS_KEY="${OPS_KEY:-pf_o_local_ops-ana}"
 OPS_KEY_2="${OPS_KEY_2:-pf_o_local_ops-budi}"
 PROVIDER_KEY="${PROVIDER_KEY:-sim_local_provider_key}"
+BANK_KEY="${BANK_KEY:-bank_local_statement_key}"
 WEBHOOK_SECRET="${WEBHOOK_SECRET:-whsec_local_payflow}"
 CHECK_FAILURES=0
 API_KEY=""
@@ -45,6 +46,7 @@ as_merchant() { local API_KEY="$MERCHANT_KEY"; "$@"; }
 as_ops() { local API_KEY="$OPS_KEY"; "$@"; }
 as_ops2() { local API_KEY="$OPS_KEY_2"; "$@"; }
 as_provider() { local API_KEY="$PROVIDER_KEY"; "$@"; }
+as_bank() { local API_KEY="$BANK_KEY"; "$@"; }
 anonymous() { local API_KEY=""; "$@"; }
 
 # pick DOTTED.PATH  -> prints a field of BODY (list indexes allowed, e.g. rows.0.outcome)
@@ -55,6 +57,19 @@ value = json.load(sys.stdin, parse_float=decimal.Decimal)
 for key in sys.argv[1].split("."):
     value = value[int(key)] if isinstance(value, list) else value[key]
 print(json.dumps(value) if isinstance(value, (list, dict, bool)) or value is None else value)' "$1"
+}
+
+# json PYTHON_EXPRESSION  -> evaluates the expression with the parsed BODY as `b` and prints the result
+json() {
+  printf '%s' "$BODY" | python3 -c '
+import decimal, json, sys
+b = json.load(sys.stdin, parse_float=decimal.Decimal)
+print(eval(sys.argv[1]))' "$1"
+}
+
+# money VALUE  -> 348950.0 -> 348950, 6.5 -> 6.50
+money() {
+  python3 -c 'import decimal, sys; d = decimal.Decimal(sys.argv[1]); print(int(d) if d == d.to_integral_value() else "%.2f" % d)' "$1"
 }
 
 # size  -> number of elements in a top-level JSON array BODY
@@ -223,4 +238,86 @@ owed() {
 import decimal, json, sys
 rows = json.load(sys.stdin, parse_float=decimal.Decimal)
 print(rows[0]["owedToMerchant"] if rows else "0")'
+}
+
+# ---- settlement and the bank leg --------------------------------------------------------------------
+
+# quiet_outbox  -> waits until no provider call is pending, so a fault injected next hits this scenario's call
+quiet_outbox() {
+  local i
+  for ((i = 0; i < 60; i++)); do
+    run_outbox
+    as_ops request GET /api/operations/summary ""
+    if [ "$(pick providerCalls.pending)" = "0" ]; then return 0; fi
+    sleep 0.5
+  done
+}
+
+# batch_view BATCH  -> the batch seen three ways: ledger, provider, bank, with every check
+batch_view() { as_ops request GET "/api/reconciliation/three-way/batches/$1" ""; }
+
+# settle_now  -> one settlement batch for the merchant, sent to the provider; prints the batch id once in transit
+settle_now() {
+  as_ops request POST "/api/settlements/batches?merchantId=$MERCHANT_ID" ""
+  if [ "$STATUS" != "201" ]; then
+    echo "settlement failed: HTTP $STATUS $BODY" >&2
+    exit 1
+  fi
+  local batch i
+  batch=$(pick id)
+  for ((i = 0; i < 60; i++)); do
+    batch_view "$batch"
+    if [ "$(pick payoutStatus)" != "SENT" ]; then break; fi
+    run_outbox
+    sleep 0.5
+  done
+  printf '%s' "$batch"
+}
+
+# bank_fault MODE [EXTRA_JSON]  -> the bank mishandles the next credit (e.g. bank_fault NET_OF_FEES '"amount": 6500')
+bank_fault() {
+  local extra="${2:-}"
+  as_bank request POST /bank-sim/v1/faults "{\"mode\": \"$1\", \"times\": 1${extra:+, $extra}}"
+}
+
+# close_bank_through DATE  -> the bank closes its business days through DATE and issues a statement for each
+close_bank_through() {
+  as_bank request POST /bank-sim/v1/days/close "{\"currency\": \"IDR\", \"through\": \"$1\"}"
+}
+
+pull_statements() { as_ops request POST /api/bank/statements/pull ""; }
+three_way() { as_ops request POST /api/reconciliation/three-way/run ""; }
+
+# bank_catch_up DATE  -> closes the bank through DATE, imports its statements and runs the three-way reconciliation
+bank_catch_up() {
+  close_bank_through "$1"
+  pull_statements
+  three_way
+}
+
+# provider_report  -> imports the provider's settlement report for today, as published by the provider
+provider_report() {
+  as_provider request GET "/provider-sim/v1/reports/settlement?date=$(date +%F)" ""
+  as_ops request POST /api/reconciliation/reports "$BODY"
+}
+
+# plus_days DATE N  -> DATE + N days
+plus_days() {
+  python3 -c 'import datetime, sys; print(datetime.date.fromisoformat(sys.argv[1]) + datetime.timedelta(days=int(sys.argv[2])))' "$1" "$2"
+}
+
+# states PAYMENT...  -> the payments' states, space separated
+states() {
+  local payment result=""
+  for payment in "$@"; do
+    as_ops request GET "/api/payment-intents/$payment" ""
+    result="$result $(pick state)"
+  done
+  printf '%s' "${result# }"
+}
+
+# rule_holds NAME  -> True when the money rule holds now (GET /api/operations/invariants)
+rule_holds() {
+  as_ops request GET /api/operations/invariants ""
+  json "[r['holds'] for r in b['rules'] if r['name'] == '$1'][0]"
 }
