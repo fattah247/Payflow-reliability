@@ -28,4 +28,13 @@ class ProviderConfigurationGuardTest {
                 "whsec_live", "whsec_local_payflow"), false)).hasSize(2);
         assertThat(ProviderConfigurationGuard.problems(provider("https://api.psp.example", "live-key", "whsec_live"), false)).isEmpty();
     }
+
+    @Test
+    void shouldRefuseTheBankSimulatorNextToARealBankFeed() {
+        assertThat(ProviderConfigurationGuard.bankProblems("", "bank_local_statement_key", true)).isEmpty();
+        assertThat(ProviderConfigurationGuard.bankProblems("https://bank.example/statements", "real-key", true))
+                .singleElement().asString().contains("bank simulator must not run");
+        assertThat(ProviderConfigurationGuard.bankProblems("https://bank.example/statements", "bank_local_statement_key", false))
+                .singleElement().asString().contains("local demo key");
+    }
 }

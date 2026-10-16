@@ -19,8 +19,8 @@ import java.util.List;
 
 /**
  * Stateless API-key authentication. Merchants may only create and read their own payments and
- * refunds; everything operational needs an operator. The provider webhook and the provider
- * simulator authenticate themselves (HMAC signature, simulator key), so they bypass API keys.
+ * refunds; everything operational needs an operator. The provider webhook and the provider and bank
+ * simulators authenticate themselves (HMAC signature, simulator keys), so they bypass API keys.
  */
 @Configuration
 public class SecurityConfig implements WebMvcConfigurer {
@@ -51,7 +51,7 @@ public class SecurityConfig implements WebMvcConfigurer {
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers("/error", "/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
                         .requestMatchers(HttpMethod.POST, "/fake-provider/webhook").permitAll()
-                        .requestMatchers("/provider-sim/**").permitAll()
+                        .requestMatchers("/provider-sim/**", "/bank-sim/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents").hasRole(MERCHANT)
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents/*/start").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.GET, "/api/payment-intents/*").hasAnyRole(MERCHANT, OPERATOR)

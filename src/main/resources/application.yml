@@ -82,6 +82,10 @@ payflow:
     delivery-max-backoff: 5m
     fault-delay: 8s
     dispatch-interval: 1s
+  # The local stand-in for the bank holding the settlement account (statements in camt.053). Local only.
+  bank-sim:
+    enabled: ${PAYFLOW_BANK_SIM_ENABLED:true}
+    api-key: ${PAYFLOW_BANK_API_KEY:bank_local_statement_key}
   workers:
     enabled: ${PAYFLOW_WORKERS_ENABLED:true}
   outbox:

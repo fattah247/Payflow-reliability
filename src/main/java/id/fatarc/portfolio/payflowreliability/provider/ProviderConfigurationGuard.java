@@ -11,23 +11,44 @@ import java.util.List;
 /**
  * Refuses to start with a provider setup that would let outsiders move money: the simulator (whose key
  * can create signed provider events) next to a real provider, or a real provider with the documented
- * local secrets. Warns whenever the simulator is on.
+ * local secrets. The same for the bank: the bank simulator (whose statements land payouts) next to a real
+ * bank statement feed, or a real feed with the local key. Warns whenever a simulator is on.
  */
 @Component
 public class ProviderConfigurationGuard {
     static final String LOCAL_API_KEY = "sim_local_provider_key";
     static final String LOCAL_WEBHOOK_SECRET = "whsec_local_payflow";
+    static final String LOCAL_BANK_KEY = "bank_local_statement_key";
     private static final Logger log = LoggerFactory.getLogger(ProviderConfigurationGuard.class);
 
     public ProviderConfigurationGuard(ProviderProperties provider, Environment environment) {
         boolean simulatorEnabled = environment.getProperty("payflow.provider-sim.enabled", Boolean.class, false);
-        List<String> problems = problems(provider, simulatorEnabled);
+        boolean bankSimulatorEnabled = environment.getProperty("payflow.bank-sim.enabled", Boolean.class, false);
+        List<String> problems = new ArrayList<>(problems(provider, simulatorEnabled));
+        problems.addAll(bankProblems(environment.getProperty("payflow.bank.base-url"), environment.getProperty("payflow.bank.api-key"),
+                bankSimulatorEnabled));
         if (!problems.isEmpty()) {
             throw new IllegalStateException("Unsafe provider configuration: " + String.join(" ", problems));
         }
         if (simulatorEnabled) {
             log.warn("The provider simulator is enabled: its key can create signed provider events. Local use only.");
         }
+        if (bankSimulatorEnabled) {
+            log.warn("The bank simulator is enabled: its statements can land payouts. Local use only.");
+        }
+    }
+
+    static List<String> bankProblems(String bankBaseUrl, String bankApiKey, boolean bankSimulatorEnabled) {
+        List<String> problems = new ArrayList<>();
+        boolean realBank = bankBaseUrl != null && !bankBaseUrl.isBlank();
+        if (realBank && bankSimulatorEnabled) {
+            problems.add("The bank simulator must not run next to a real bank statement feed (payflow.bank.base-url is set);"
+                    + " set payflow.bank-sim.enabled=false.");
+        }
+        if (realBank && LOCAL_BANK_KEY.equals(bankApiKey)) {
+            problems.add("payflow.bank.api-key is the local demo key.");
+        }
+        return problems;
     }
 
     static List<String> problems(ProviderProperties provider, boolean simulatorEnabled) {

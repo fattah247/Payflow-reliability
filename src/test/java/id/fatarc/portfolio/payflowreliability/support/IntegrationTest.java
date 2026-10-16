@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import id.fatarc.portfolio.payflowreliability.audit.AuditChainVerifier;
 import id.fatarc.portfolio.payflowreliability.audit.AuditEvent;
 import id.fatarc.portfolio.payflowreliability.audit.AuditEventRepository;
+import id.fatarc.portfolio.payflowreliability.banksim.BankFaults;
+import id.fatarc.portfolio.payflowreliability.banksim.BankSimulator;
 import id.fatarc.portfolio.payflowreliability.common.WebhookSignatures;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerInvariantService;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerJournalRepository;
@@ -83,7 +85,9 @@ public abstract class IntegrationTest {
     protected static final String WEBHOOK_SECRET = "whsec_test_current";
     protected static final String PREVIOUS_WEBHOOK_SECRET = "whsec_test_previous";
 
-    private static final List<String> TABLES = List.of("settlement_batch_items", "settlement_batches", "ledger_postings",
+    private static final List<String> TABLES = List.of("reconciliation_breaks", "provider_payout_reports",
+            "bank_statement_lines", "bank_statements", "bank_accounts", "sim_payout_items", "sim_payouts", "bank_sim_entries",
+            "bank_sim_statements", "bank_sim_accounts", "settlement_batch_items", "settlement_batches", "ledger_postings",
             "ledger_journals", "outbox_commands", "provider_events", "refund_requests", "review_cases",
             "payment_transactions", "audit_events", "idempotency_records", "payment_intents", "merchant_api_keys",
             "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments", "sim_api_requests");
@@ -120,6 +124,8 @@ public abstract class IntegrationTest {
     @Autowired protected SimFaults simFaults;
     @Autowired protected SimApiRequestRepository simApiRequestRepository;
     @Autowired protected CrashableProviderClient providerClient;
+    @Autowired protected BankSimulator bankSimulator;
+    @Autowired protected BankFaults bankFaults;
 
     protected String merchantAKey;
     protected String merchantBKey;
@@ -128,6 +134,7 @@ public abstract class IntegrationTest {
     void resetWorld() {
         clock.reset();
         simFaults.clear();
+        bankFaults.clear();
         providerClient.reset();
         truncateAll();
         merchantAKey = merchantService.register(new RegisterMerchantRequest(MERCHANT_A, "Merchant A"), OPS_ANA).apiKey().apiKey();

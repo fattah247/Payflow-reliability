@@ -31,6 +31,9 @@ payflow:
     delivery-base-backoff: 1ms
     delivery-max-backoff: 2ms
     fault-delay: 1500ms
+  bank-sim:
+    enabled: true
+    api-key: bank_test_statement_key
   # Tests run every background job explicitly, so outcomes do not depend on timing.
   workers:
     enabled: false
