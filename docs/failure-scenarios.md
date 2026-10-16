@@ -493,6 +493,23 @@ rupiah. Moving the step-up threshold up lowers friction and raises fraud loss, n
 
 Proof: `RiskReportTest`
 
+## Everything at once
+
+### Random histories of faults
+
+What happened: any mix of the failures above, in any order: retried checkouts, duplicated, lost and reordered
+webhooks, refunds while the provider is down or commits then times out, workers dying after the provider acted,
+racing settlement runs, chargebacks around payout, every bank fault, re-imported and re-issued statements, slow
+periods, abandoned checkouts, step-ups and blocks, and a provider charging a blocked payment.
+
+Expected: once everything settles, all eleven money rules hold (`GET /api/operations/invariants`): books balance
+against the bank and the open breaks to the cent, no capture paid out twice, nothing reconciled without a bank
+line, every unmatched line has a break, no bank entry booked twice, every landing proven, no blocked payment at the
+provider, no step-up started unconfirmed, no retry charged twice, refunds and payouts executed once.
+
+Proof: `MoneyInvariantPropertyTest` (50 random histories per run, with coverage checks), `ChaosRunTest`,
+`./scripts/scenarios.sh chaos` against the packaged app in CI
+
 ## Operations and evidence
 
 ### Books that disagree with operations

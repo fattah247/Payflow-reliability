@@ -76,7 +76,8 @@ the controller maps each outcome to the status the caller needs.
 
 ## How do you know the tests test anything?
 
-Mutation checks: disabling the signature check, self-approval, refunds in progress, the audit hash check, the
+Mutation checks (the settlement-certainty and device-risk ones are listed in
+[Settlement certainty](settlement-certainty.md#53-breaking-the-rules-on-purpose-mutation-checks)): disabling the signature check, self-approval, refunds in progress, the audit hash check, the
 payout term of the ledger invariant, the outbox lease, the idempotency hash comparison, merchant isolation, the
 contradiction hold, the contradiction gate on refunds, or the replay window each makes a test fail, and so does
 putting back any of the defects the independent review found. One mutation initially survived: settlement
@@ -104,11 +105,89 @@ Nine defects, two of them serious, all fixed with a regression test, each checke
 
 The lesson I took: "the provider might have acted" has to be written down before the call, not inferred after.
 
+## "Idempotency checks are table stakes. Where is settlement certainty?"
+
+Agreed: a check only helps if the keys are right, and a payment is not settled because the provider says so. The
+answer is in [Settlement certainty](settlement-certainty.md). In short, each stage of the money has its own
+evidence (an authenticated event, a capture journal, the provider's payout answer and report, a matched bank
+statement line), and the system never treats an earlier stage as a later one. A payout is in transit until a bank
+credit with its reference, the right amount and a value date inside the window arrives; only then does it land,
+and only a payment with both a clean provider report row and a landed payout is RECONCILED. Everything that does
+not match becomes a break with an owner and a deadline.
+
+## How are idempotency keys generated, and why does that matter more than the check?
+
+The check compares a key with what it was first used for; generation decides whether a retry and a new purchase
+look different. Clients generate one key per business operation (a checkout, a refund), before the first attempt,
+and reuse it for every retry. The server stores a canonical fingerprint of the business fields (field order,
+whitespace and number formatting do not matter), scoped to the merchant and the operation, and refuses the same
+key with a different payload. Payment and refund keys never expire; operator keys expire after 24 hours, and the
+contract says so. For calls we make, the key is derived once from the operation (`refund-<id>`,
+`payout-<batch>`), never per attempt, and never resent once the provider may have forgotten it (we stop at 23
+hours, it keeps keys for 24). A key per attempt would turn every timeout into a second payment; the slowness
+scenario shows exactly that cost. ([client contract](idempotency-keys.md), [ADR 024](adr/024-idempotency-keys-end-to-end.md))
+
+## When is a payout really paid, and why not match bank credits by amount?
+
+When a bank statement line carries the payout's reference, the amount equals what the provider said it sent net
+of its fee (plus any itemized bank charge), and the value date is inside the window. Matching by amount alone
+lands the wrong payout whenever two batches have the same net, and hides the one that never arrived. A credit
+without our reference goes to suspense and waits for an operator, who can assign it to a payout but cannot
+override the amount. One of the mutation checks was exactly "match by amount when the reference is missing", and
+the tests caught it.
+
+## What happens when the bank and the books disagree?
+
+A break: a category (missing credit, late credit, duplicate, returned, amount mismatch, statement conflict...), an
+owner (treasury or provider operations), an amount, the money it holds in suspense, and a due time. Overdue breaks
+page. Money in suspense cannot be clicked away: only a matching line, a return or an amount-checked assignment
+closes such a break, and the ledger check proves `bank_suspense` equals the open breaks to the cent. Fees are their
+own ledger lines, so gross minus fees equals cash received or the journal does not post.
+
+## Why is slowness a money problem?
+
+Because "slow but up" passes every health check while customers leave and impatient ones press pay again. The
+system measures, from its own records, payments past the confirmation SLO, checkouts abandoned (amount per minute),
+retries absorbed and duplicate charges, and pages when health is UP and money is at risk. In the seeded scenario a
+slow provider costs 16 abandoned checkouts (4,369,000 IDR) and leaves 24 payments (7,073,000 IDR) unconfirmed past
+the SLO, with zero duplicate charges because every retry reused its checkout's key. ([ADR 027](adr/027-slowness-as-money.md))
+
+## How does device risk relate to trustgate-android, and why decide on the server?
+
+The app detects device signals and signs step-up confirmations; it is the client half. The server takes the
+decision because it knows what the device cannot (the amount and what is bought) and because a decision in the
+app can be patched out. With amount and action points off, the server decides exactly like the app's gate, for
+every combination of its signals. The device's claimed level is recorded and ignored. A step-up holds the payment
+until the shop relays the confirmation (only the merchant can, never an operator); a block is final and never
+reaches the provider. The decision is taken once, and the evidence is not part of the request fingerprint, so
+retrying with cleaned signals under the same key returns the same block. ([ADR 028](adr/028-device-risk-as-money.md))
+
+## How do you know a fraud threshold is right?
+
+By pricing it. From the decisions and the labels learned later, the system reports fraud stopped, fraud loss,
+honest money lost to friction, precision and recall, and a sweep re-decides every labelled payment under other
+thresholds. In the seeded scenario, raising the step-up threshold from 2 to 3 saves about 4.8 million IDR of honest
+sales and costs about 9.7 million IDR of extra fraud. That is a business decision, and now it can be made with
+numbers. The caveat I would raise myself: in production, blocked payments are rarely labelled, so live precision is
+biased; real systems keep a small random holdout.
+
+## How do you test that all of this holds together?
+
+Eleven money rules are production code with evidence for every violation. A property-based test plays 50 random
+histories of 20 to 60 faults per run against the real application (duplicate and lost webhooks, commit-then-timeout,
+crashed workers, racing settlements, chargebacks around payout, every bank fault, slow periods, device-risk
+decisions) and checks every rule, and it also fails if the histories did not reach the hard states often enough.
+Nine deliberate breakages of the new protections were each caught, every one by the property test on its own. The
+same kinds of faults run live in CI as a seeded chaos scenario against the packaged app.
+
 ## What would you add for production?
 
 An identity provider instead of static operator keys, a gateway with rate limiting, chain-head anchoring
 outside the database, a real provider integration behind the same client interface, and the alert rules wired
-to an on-call rotation. The code is structured so each of these replaces a component instead of rewriting flows.
+to an on-call rotation. On the money side: the payout leg on to each merchant's bank (payment files out, debits
+matched in the same statements), more of the bank formats (camt.052 and camt.054), velocity rules across attempts
+for device risk, and a random holdout so fraud labels are unbiased. The code is structured so each of these
+replaces or adds a component instead of rewriting flows.
 
 ## Why keep this a modular monolith?
 

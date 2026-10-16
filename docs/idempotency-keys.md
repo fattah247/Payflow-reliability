@@ -114,4 +114,6 @@ the worker right after the provider refunded the customer.
 
 ```bash
 ./scripts/scenarios.sh idempotency          # replay, changed payload, 8 parallel retries
+./scripts/scenarios.sh outbound-key-crash   # the provider acts then times out; one outbound key, applied once
+./scripts/scenarios.sh slow-but-up          # impatient customers retry; every retry answered by its key
 ```
