@@ -411,6 +411,39 @@ payouts it omits or invents are breaks. A clean payment row is MATCHED_AWAITING_
 
 Proof: `ProviderPayoutReportTest`, `ReconciliationTest.shouldReconcileOnlyOnceTheReportMatchesAndThePayoutHasLanded`
 
+## Slowness (up, but costing money)
+
+The customers in these tests are simulated (`CheckoutLoadGenerator`, seed 42): their patience and choices are model
+parameters, documented in ADR 027, not observed behaviour.
+
+### The provider is slow but up
+
+What happened: the provider's payment page and payment answers slow down and its webhooks lag, while every health
+check passes.
+
+Expected: customers with less patience leave (the shop cancels their payment as ABANDONED) or retry; paid payments
+wait past the confirmation SLO. The payment system measures the abandoned amount, the payments and money stuck past
+the SLO, and confirmations outside the SLO once the provider recovers, and each figure equals the simulation's own
+count. `PayflowSlowButUp` pages while `payflow_health_up` is 1.
+
+Proof: `CheckoutLoadTest.shouldMeasureWhatASlowProviderCostsWhileEverythingIsUp`, `CheckoutSloTest`,
+`ops/prometheus/alerts.test.yml`
+
+### Impatient customers press pay again
+
+Expected: with one key per checkout every retry is answered with the original payment and the provider refuses to
+charge it twice: zero duplicate charges. With a key per attempt each retry is a new payment, charged again, and the
+payment system counts every duplicate (`PayflowDuplicateCharge` pages).
+
+Proof: `CheckoutLoadTest.shouldShowWhatAKeyPerAttemptCosts`
+
+### The customer pays after the shop gave up
+
+Expected: a capture for a CANCELLED payment is never applied; it goes to review (the provider holds money for a
+cancelled checkout and someone has to return it).
+
+Proof: `CheckoutSloTest.shouldSendACaptureForACancelledCheckoutToReviewInsteadOfTakingTheMoney`
+
 ## Operations and evidence
 
 ### Books that disagree with operations
