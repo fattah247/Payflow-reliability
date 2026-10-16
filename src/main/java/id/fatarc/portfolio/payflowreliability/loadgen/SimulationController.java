@@ -12,10 +12,22 @@ import org.springframework.web.server.ResponseStatusException;
 public class SimulationController {
     private final CheckoutLoadGenerator checkoutLoadGenerator;
     private final RiskTrafficGenerator riskTrafficGenerator;
+    private final ChaosRunner chaosRunner;
 
-    public SimulationController(CheckoutLoadGenerator checkoutLoadGenerator, RiskTrafficGenerator riskTrafficGenerator) {
+    public SimulationController(CheckoutLoadGenerator checkoutLoadGenerator, RiskTrafficGenerator riskTrafficGenerator,
+                                ChaosRunner chaosRunner) {
         this.checkoutLoadGenerator = checkoutLoadGenerator;
         this.riskTrafficGenerator = riskTrafficGenerator;
+        this.chaosRunner = chaosRunner;
+    }
+
+    /** Plays a seeded sequence of faults against this application, lets it settle, and checks every money rule. */
+    @PostMapping("/chaos-runs")
+    public ChaosRunner.Report chaosRun(@RequestBody ChaosRunner.Request request) {
+        if (request.merchantApiKey() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "merchantApiKey is required");
+        }
+        return chaosRunner.run(request);
     }
 
     /** Runs labelled customers (honest and fraudulent) with device evidence, then discloses the ground truth as labels. */
