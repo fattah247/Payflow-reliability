@@ -1,5 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.ledger;
 
+import id.fatarc.portfolio.payflowreliability.common.BusinessException;
+import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
 import id.fatarc.portfolio.payflowreliability.ledger.dto.BalanceView;
 import id.fatarc.portfolio.payflowreliability.ledger.dto.InvariantReport;
 import id.fatarc.portfolio.payflowreliability.ledger.dto.JournalView;
@@ -26,9 +28,14 @@ public class LedgerController {
         return queryService.balances(merchantId, currency);
     }
 
+    /** A payment's journals ({@code paymentIntentId}), or those with one reference, such as a settlement batch id. */
     @GetMapping("/journals")
-    public List<JournalView> journals(@RequestParam UUID paymentIntentId) {
-        return queryService.journalsForPayment(paymentIntentId);
+    public List<JournalView> journals(@RequestParam(required = false) UUID paymentIntentId,
+                                      @RequestParam(required = false) String reference) {
+        if ((paymentIntentId == null) == (reference == null)) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED, "Give exactly one of paymentIntentId and reference.");
+        }
+        return paymentIntentId != null ? queryService.journalsForPayment(paymentIntentId) : queryService.journalsByReference(reference);
     }
 
     /** Runs the consistency check now. */

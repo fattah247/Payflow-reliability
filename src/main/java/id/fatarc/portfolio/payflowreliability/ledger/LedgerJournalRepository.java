@@ -9,4 +9,6 @@ public interface LedgerJournalRepository extends JpaRepository<LedgerJournal, UU
     boolean existsByJournalTypeAndReference(JournalType journalType, String reference);
 
     List<LedgerJournal> findByPaymentIntentIdOrderByCreatedAtAsc(UUID paymentIntentId);
+
+    List<LedgerJournal> findByReferenceOrderByCreatedAtAsc(String reference);
 }

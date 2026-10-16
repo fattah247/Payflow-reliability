@@ -38,7 +38,16 @@ public class LedgerQueryService {
 
     @Transactional(readOnly = true)
     public List<JournalView> journalsForPayment(UUID paymentIntentId) {
-        List<LedgerJournal> journals = journalRepository.findByPaymentIntentIdOrderByCreatedAtAsc(paymentIntentId);
+        return views(journalRepository.findByPaymentIntentIdOrderByCreatedAtAsc(paymentIntentId));
+    }
+
+    /** Journals by their reference: a settlement batch id for its payout journals, a bank line id for bank journals. */
+    @Transactional(readOnly = true)
+    public List<JournalView> journalsByReference(String reference) {
+        return views(journalRepository.findByReferenceOrderByCreatedAtAsc(reference));
+    }
+
+    private List<JournalView> views(List<LedgerJournal> journals) {
         Map<UUID, List<LedgerPosting>> postings = postingRepository
                 .findByJournalIdIn(journals.stream().map(LedgerJournal::getId).toList()).stream()
                 .collect(Collectors.groupingBy(LedgerPosting::getJournalId));

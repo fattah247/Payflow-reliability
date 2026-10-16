@@ -19,6 +19,10 @@ import java.time.ZoneId;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.contains;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * A payout's money from batch to bank: SENT when the batch is created, IN_TRANSIT on the provider's word,
@@ -44,7 +48,7 @@ class PayoutLifecycleTest extends IntegrationTest {
     }
 
     @Test
-    void shouldGoFromSentToInTransitToLandedWithTheFeeOnItsOwnLine() {
+    void shouldGoFromSentToInTransitToLandedWithTheFeeOnItsOwnLine() throws Exception {
         SettlementBatch batch = settledBatch();
 
         assertThat(batch.getPayoutStatus()).isEqualTo(PayoutStatus.SENT);
@@ -75,6 +79,15 @@ class PayoutLifecycleTest extends IntegrationTest {
         assertThat(balance(LedgerAccounts.PAYOUTS_IN_TRANSIT)).isEqualByComparingTo("0");
         assertThat(ledgerJournalRepository.existsByJournalTypeAndReference(JournalType.PAYOUT_LANDED, batch.getId().toString())).isTrue();
         assertThat(ledgerInvariantService.check().violations()).isEmpty();
+
+        // The batch's journals, as an operator reads them: gross out of transit, net into cash, the fee on its own line.
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/ledger/journals").param("reference", batch.getId().toString())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].type", contains("PAYOUT", "PAYOUT_IN_TRANSIT", "PAYOUT_LANDED")))
+                .andExpect(jsonPath("$[2].postings[?(@.account == 'bank_cash')].amount", contains(2991.0)))
+                .andExpect(jsonPath("$[2].postings[?(@.account == 'provider_fees')].amount", contains(9.0)))
+                .andExpect(jsonPath("$[2].postings[?(@.account == 'payouts_in_transit')].amount", contains(-3000.0)));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/ledger/journals"))).andExpect(status().isBadRequest());
     }
 
     @Test
