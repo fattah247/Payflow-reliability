@@ -144,7 +144,7 @@ public abstract class IntegrationTest {
     protected String merchantBKey;
 
     @BeforeEach
-    void resetWorld() {
+    protected void resetWorld() {
         clock.reset();
         simFaults.clear();
         bankFaults.clear();
