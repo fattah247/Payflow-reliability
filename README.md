@@ -4,12 +4,17 @@
 
 A local-first Spring Boot payment backend built around the failures that cost real money: retried requests,
 duplicated and lost webhooks, a provider that acts and then times out, concurrent jobs, refunds after payout,
-reports that disagree with the books, and people who make mistakes or act alone.
+payouts that never reach the bank, reports and statements that disagree with the books, a provider that is slow
+but "up", risky devices, and people who make mistakes or act alone.
 
-It runs on a laptop with no cloud services. A provider simulator speaks real HTTP to the application,
-signs its webhooks, retries them, loses them on request, and can commit a refund and then answer too late.
-Everything below is proven by tests that run on H2 and on PostgreSQL, and by scripted scenarios that run
-against the live application in CI.
+It runs on a laptop with no cloud services. A provider simulator speaks real HTTP to the application, signs its
+webhooks, retries them, loses them on request, and can commit a refund and then answer too late. A bank simulator
+issues camt.053 statements for the settlement account, with late, missing, duplicated, net-of-fee, unreferenced
+and returned credits on request. Everything below is proven by tests that run on H2 and on PostgreSQL, and by
+scripted scenarios that run against the live application in CI.
+
+**Start here:** [Settlement certainty](docs/settlement-certainty.md) follows a payment's money from capture to
+the bank statement, with the evidence at each stage, and shows slowness and device risk measured as money.
 
 > This is a public-safe educational project based on common payment engineering patterns. It does not use
 > proprietary employer code, architecture, data, naming, business rules, logs, screenshots, or internal workflows.
@@ -18,12 +23,27 @@ against the live application in CI.
 
 ## What This Project Proves
 
+**Settlement is certain only when the bank says so**
+- payouts have a lifecycle (sent, in transit, landed, or broken with a reason), and only a bank credit matched by
+  reference, amount and value date lands one; the provider's word is never treated as cash
+- a three-way reconciliation of ledger, provider report and bank statement, per payout and per payment; a payment
+  is RECONCILED only with both a clean report row and a landed payout
+- provider fees and bank charges as their own ledger lines, so gross minus fees equals cash received to the cent;
+  unexplained money goes to suspense
+- every disagreement becomes a break with a category, an owner, an amount and a due time; overdue breaks page,
+  and the jobs that find them have dead man's switches
+- statement import is idempotent (statement id plus each line's bank reference) and safe out of order
+
 **Money is never moved twice, and never lost track of**
-- idempotency keys on every money-moving request, including two retries racing each other
+- idempotency keys on every money-moving request, including two retries racing each other; the request
+  fingerprint is a canonical hash of the business fields, scoped to the merchant and operation, with a stated expiry
+  ([client contract](docs/idempotency-keys.md))
+- outbound keys derived once from the business operation (`refund-<id>`, `payout-<batch>`), never per attempt, and
+  never resent after the provider may have forgotten them
 - provider calls through a transactional outbox: leases, backoff with jitter, and an "unknown outcome" state
   resolved by asking the provider before resending
 - a double-entry ledger posted with every business change, plus a scheduled invariant check that compares the
-  books with payments, refunds, reversals and payouts
+  books with payments, refunds, reversals, payouts, bank statements and open breaks
 - partial refunds that can never exceed the capture, even under concurrent requests
 - net settlement: refunds and reversals are deducted from payouts, a negative net carries forward
 - one lock order everywhere (payment row first), optimistic versions, and unique constraints on every
@@ -41,7 +61,24 @@ against the live application in CI.
 - a hash-chained audit trail per payment, verifiable on demand, append-only in PostgreSQL
 - reconciliation in both directions: report rows that disagree, and payouts the provider did not report
 
+**Slowness and fraud controls are measured in money**
+- a seeded load generator drives simulated customers through the real API while the provider turns slow but
+  healthy; abandoned money, payments past the confirmation SLO and duplicate charges (zero with proper keys) are
+  measured from the system's own records, and a "slow but up" alert fires while health says UP
+- a server-side device-risk decision on every payment, compatible with
+  [trustgate-android](https://github.com/fattah247/trustgate-android): step-ups hold the payment until confirmed,
+  blocked payments never reach the provider, and every decision carries its rule and points in the audit chain
+- fraud stopped, fraud loss, honest money lost to friction, precision and recall from labelled traffic, and a
+  threshold sweep that prices moving one threshold
+
+**The money rules hold together, under chaos**
+- eleven money rules checked on demand, with evidence for every violation
+- a property-based test throws long random histories of faults at the real application and checks every rule;
+  nine deliberate breakages of the protections were each caught by it
+- a seeded chaos run plays the same kinds of faults against the packaged app in CI
+
 **Operations can see and act**
+- one view of money at risk (past the SLO, abandoned, held, in breaks by age, awaiting a step-up, blocked today)
 - a case file per payment and an operations summary
 - Prometheus gauges for what needs people, alert rules with a runbook, dead man's switches for the checks
 - trace ids on every log line and provider call; graceful shutdown; health probes
@@ -53,7 +90,8 @@ against the live application in CI.
 - Java 21, Spring Boot 3.5 (Web, Validation, Data JPA, Security, Actuator)
 - PostgreSQL 16 at runtime, H2 (PostgreSQL mode) for fast tests; the suite runs on both
 - Flyway (SQL, Java data migrations, vendor-specific safeguards); Hibernate in `validate` mode
-- Micrometer with Prometheus registry and OpenTelemetry tracing bridge; Prometheus alert rules
+- Micrometer with Prometheus registry and OpenTelemetry tracing bridge; Prometheus alert rules tested with `promtool`
+- JUnit 5, AssertJ, MockMvc, and jqwik for property-based tests
 - Maven Wrapper, Docker Compose, GitHub Actions
 
 ---
@@ -71,21 +109,28 @@ Spring Boot modular monolith: stateless security, one transaction per request, p
         ├── idempotency     stored responses for retried operator calls
         ├── payment         intents, state machine, webhook inbox, status sweeper
         ├── provider        HTTP client with timeouts, signature verification
-        ├── outbox          refunds and reversals executed at the provider, leased, retried, escalated
+        ├── outbox          refunds, reversals and payouts executed at the provider, leased, retried, escalated
         ├── refund          partial refunds, cancellation, approval after reconciliation
         ├── ledger          balanced journals, balances, invariant check
-        ├── settlement      net payout batches, backlog
-        ├── reconciliation  two-sided report matching
+        ├── settlement      net payout batches, payout lifecycle, backlog
+        ├── bank            camt.053 statement import, coverage, the bank's statement feed
+        ├── reconciliation  three-way matching (ledger, provider report, bank), breaks with owners and aging
+        ├── checkout        confirmation SLO and slowness measured as money
+        ├── risk            device-risk policy, step-up and block, labels, report and threshold sweep
         ├── review          review queue, decisions, two-person approval
         ├── audit           hash-chained audit events and verification
-        ├── operations      case file, summary, alerting gauges
+        ├── operations      case file, summary, money at risk, money rules, alerting gauges
         ├── scheduling      every background job, switched on and off together
-        └── providersim     local stand-in for the provider (own tables, own key, fault injection)
+        ├── providersim     local stand-in for the provider (own tables, own key, fault and latency injection)
+        ├── banksim         local stand-in for the bank holding the settlement account (statements, faults)
+        └── loadgen         seeded simulated customers, labelled risk traffic, and the chaos run (local only)
 
 PostgreSQL (schema owned by Flyway)
         payment_intents, payment_transactions, provider_events (inbox), refund_requests, outbox_commands,
         ledger_journals + ledger_postings (append-only), settlement_batches + items, review_cases,
-        audit_events (hash chains, append-only), merchants + merchant_api_keys, idempotency_records, sim_*
+        bank_statements + bank_statement_lines (append-only), bank_accounts, reconciliation_breaks,
+        provider_payout_reports, risk_decisions, audit_events (hash chains, append-only),
+        merchants + merchant_api_keys, idempotency_records, sim_*, bank_sim_*
 ```
 
 The full lifecycle, including background jobs and the lock order, is in [docs/architecture-flow.md](docs/architecture-flow.md).
@@ -133,9 +178,17 @@ accepted for human review), **409 PAYMENT_ON_HOLD means redeliver later**, 401 m
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED
+    [*] --> REQUIRES_CONFIRMATION: device risk asks for a step-up
+    [*] --> BLOCKED: device risk blocks
 
-    CREATED --> PENDING: start
+    REQUIRES_CONFIRMATION --> CREATED: customer confirms (required method)
+    REQUIRES_CONFIRMATION --> EXPIRED: not confirmed in time
+    REQUIRES_CONFIRMATION --> CANCELLED: shop gives up
+
+    CREATED --> PENDING: start (handed to the provider)
     CREATED --> EXPIRED: never started (sweeper)
+    CREATED --> CANCELLED: shop gives up
+    PENDING --> CANCELLED: abandoned before the customer paid
 
     PENDING --> AUTHORIZED
     PENDING --> SUCCESS: capture (ledger CAPTURE)
@@ -151,7 +204,7 @@ stateDiagram-v2
     SUCCESS --> REVERSAL_REQUIRED: provider asks before payout
     SUCCESS --> REFUNDED: refunds confirmed for the full amount
 
-    SETTLED --> RECONCILED: clean report row
+    SETTLED --> RECONCILED: clean report row and the payout landed in the bank
     SETTLED --> REFUNDED
     RECONCILED --> REFUNDED: refund approved by two operators
 
@@ -175,10 +228,16 @@ stateDiagram-v2
     EXPIRED --> [*]
     REFUNDED --> [*]
     REVERSED --> [*]
+    BLOCKED --> [*]
+    CANCELLED --> [*]
 ```
 
 Partial refunds do not change the state; the payment tracks `refundedAmount` and becomes `REFUNDED` only
-when the whole amount has been returned. Final outcomes are facts and are never overwritten by a hold.
+when the whole amount has been returned. Final outcomes are facts and are never overwritten by a hold. A capture
+for a blocked, unconfirmed or cancelled payment is a contradiction: it goes to review and is never applied.
+
+A settlement batch has its own lifecycle (`SENT`, `IN_TRANSIT`, `LANDED`, or `BROKEN` with a reason), shown with
+the ledger postings at each step in [Settlement certainty](docs/settlement-certainty.md#the-payout-lifecycle).
 
 ---
 
@@ -246,10 +305,11 @@ The same suite runs against PostgreSQL by pointing Spring at it (CI does both):
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/payflow_reliability SPRING_DATASOURCE_USERNAME=payflow_reliability SPRING_DATASOURCE_PASSWORD=payflow_reliability ./mvnw test
 ```
 
-188 tests in 25 classes. They are **not** wrapped in a test-managed transaction: every service call commits or
-rolls back exactly as in production, and the provider simulator and its webhooks run over the server's real
-HTTP port. Background jobs are off in tests and each test runs them explicitly against a movable clock, so
-retries, leases, replay windows and expiry are tested without sleeping.
+277 tests in 41 classes, one of them a property-based test that runs 50 random histories of faults. They are
+**not** wrapped in a test-managed transaction: every service call commits or rolls back exactly as in production,
+and the provider and bank simulators and the webhooks run over the server's real HTTP port. Background jobs are
+off in tests and each test runs them explicitly against a movable clock, so retries, leases, replay windows,
+value-date windows and expiry are tested without sleeping.
 
 | Area | What is proven |
 |---|---|
@@ -259,7 +319,12 @@ retries, leases, replay windows and expiry are tested without sleeping.
 | Lost webhooks | sweeper recovery as a POLL event, late webhook is a duplicate, expiry, provider unavailable, disagreeing answer |
 | Refunds | partial up to the capture, 5 concurrent requests never exceed it, idempotency, cancellation, provider refusal, contradiction gate |
 | Settlement | net of refunds before and after payout, negative net carried forward, 4 racing runs pay once, held payments wait, a payment changed while the run waits for its lock, a chargeback under a new transaction id never paid out as a second capture |
-| Reconciliation | per-row verdicts incl. refunded amounts, payouts missing from the report, merchant-scoped reports, safe re-import |
+| Idempotency keys | canonical request fingerprints (field order, whitespace and number formatting do not matter), scope per merchant and operation, expiry, outbound keys derived once and never resent after the provider's retention |
+| Bank leg | the camt.053 subset parsed safely (no DTDs, must add up), payouts sent, in transit, landed or broken, matching by reference, amount and value-date window, fees and bank charges as their own lines, late, missing, duplicated, unreferenced and returned credits, statements re-imported, re-sent, re-issued or out of order |
+| Reconciliation | per-row verdicts incl. refunded amounts, payouts missing from the report, merchant-scoped reports, safe re-import, nothing RECONCILED without a landed payout, breaks with owners, due times and the actions allowed |
+| Slowness | confirmations counted against the SLO, money past the SLO, abandoned checkouts measured exactly as the seeded customers behaved, zero duplicate charges with per-checkout keys and every one counted with per-attempt keys, alert rules unit-tested with `promtool` |
+| Device risk | the app's decisions reproduced for all 256 signal combinations, step-up hold, confirmation method, expiry, block never started, retries keep the first decision, rogue captures to review, fraud stopped, loss, friction, precision and recall equal to the ground truth, the threshold sweep's trade-off |
+| Money rules | eleven rules checked after 50 random histories of faults per run, with coverage checks on what the histories reached; each rule shown catching a planted violation; a seeded chaos run against the live API |
 | Review | allowed actions, release / fail / reverse, two-person approval, proposals rejected, two operators racing |
 | Ledger and audit | every journal balanced, balances per merchant, invariant violations detected, hash chain tamper detection, append-only triggers (PostgreSQL) |
 | Operations | case file, summary, sweep endpoint, alerting gauges, every alert rule references an exported metric and has a runbook |
@@ -271,6 +336,11 @@ webhook signature check, removing the replay window, letting a proposer approve 
 refunds in progress, skipping the audit hash check, dropping payouts from the ledger invariant, settling held
 payments, removing the outbox lease, replaying idempotent responses without comparing the request, turning
 off merchant isolation, not holding a contradicted payment, and sending refunds while a contradiction is open.
+For settlement certainty and device risk: matching a bank credit by amount when the reference is missing,
+skipping the fee lines, accepting a re-imported statement, scoping a bank line's identity to its statement,
+regenerating the outbound key per attempt, letting a step-up payment through unconfirmed (two ways), and sending a
+blocked payment (two ways). The property-based test alone caught every one of these nine
+([details](docs/settlement-certainty.md#53-breaking-the-rules-on-purpose-mutation-checks)).
 
 **The tests were also checked against an independent review.** A review of the finished change found nine
 defects, two of them serious: a worker crashing after the provider refunded could leave the refund cancellable
@@ -290,8 +360,9 @@ With the app running:
 
 A narrated walkthrough: onboarding and keys, idempotent creation, a customer paying at the provider with
 duplicated signed webhooks, a wrong amount that is held and recovered, a partial refund while the provider
-times out, net settlement, two-sided reconciliation, a two-operator refund approval, the books and the audit
-chain, and the operations summary. `./scripts/demo.sh` is the one-minute version.
+times out, net settlement, three-way reconciliation against the provider's report and the bank statement, a
+two-operator refund approval, the books and the audit chain, and the operations summary. `./scripts/demo.sh` is
+the one-minute version.
 
 To look at one behavior in depth, with its outcome checked:
 
@@ -307,14 +378,24 @@ To look at one behavior in depth, with its outcome checked:
 | `provider-outage` | refund committed at the provider but timed out; resolved by lookup; refunded once |
 | `lost-webhook` | the status sweeper recovers a payment whose webhook was dropped |
 | `settlement` | 4 racing runs, refunds deducted, a held payment skipped, ledger at zero |
-| `reconciliation` | per-row verdicts, a payout missing from the report, safe re-import |
+| `reconciliation` | per-row verdicts, a payout missing from the report; a clean match waits for the bank, then reconciles; safe re-import |
 | `four-eyes` | chargeback after payout, proposal, self-approval refused, second operator, reversal booked |
 | `security` | no key, other merchant, wrong role, forged and replayed webhooks |
 | `audit-trail` | case file timeline with actors, request ids and a verified hash chain |
+| `outbound-key-crash` | the provider refunds and pays out, then times out each time; one key per operation, applied once |
+| `bank-reconciliation` | ledger, provider report and bank side by side; the payout lands only on the matched credit |
+| `fee-deduction` | a provider fee and a bank charge, each its own ledger line; gross = received + fees |
+| `missing-credit` | late inside the value-date window, broken after it; a break with an owner and a due time |
+| `returned-payout` | the bank credits, then returns the payout; the money is the provider's to send again |
+| `statement-reimport` | a statement imported twice, re-sent and re-issued; one bank line, one landing |
+| `slow-but-up` | 80 seeded customers; abandoned money and payments past the SLO, zero duplicate charges, health UP |
+| `device-risk` | a block, a step-up, then 200 labelled customers: fraud stopped, friction, and a threshold's price |
+| `chaos` | a seeded sequence of faults against the live app; every money rule holds |
 
 Each prints what happened and a PASS/FAIL line per expectation, and exits non-zero if any check fails. CI runs
 all of them against the packaged app on PostgreSQL. Every run registers a fresh merchant, so they can be
-repeated without resetting the database.
+repeated without resetting the database. The simulated customers and the chaos run are seeded: their numbers
+repeat exactly, and their parameters are documented model assumptions, not data.
 
 ---
 
@@ -333,13 +414,22 @@ PostgreSQL), so every one can be reproduced.
 | Webhook redelivery | Redeliveries and a late authorization absorbed; 10 parallel deliveries applied once | `./scripts/scenarios.sh duplicate-webhook` |
 | Amount mismatch | Hold (202), redeliver later (409), a decision is required, release, recovery | `./scripts/scenarios.sh amount-mismatch` |
 | Net settlement | Four racing runs, one batch; captures minus refunds; a held payment waits | `./scripts/scenarios.sh settlement` |
-| Reconciliation | A verdict per row, a payout missing from the report, safe re-import | `./scripts/scenarios.sh reconciliation` |
+| Reconciliation | A verdict per row, a payout missing from the report; the clean match reconciles only once the bank confirms | `./scripts/scenarios.sh reconciliation` |
 | Audit trail | Timeline with actor and request id per step; the hash chain verifies | `./scripts/scenarios.sh audit-trail` |
-| Tests | 188 tests on H2 and on PostgreSQL | `./mvnw test` |
+| Tests | 277 tests on H2 and on PostgreSQL | `./mvnw test` |
 | Provider timeout | The provider refunds, then times out; the customer is refunded exactly once | `./scripts/scenarios.sh provider-outage` |
 | Lost webhook | The sweeper recovers the capture from the provider | `./scripts/scenarios.sh lost-webhook` |
 | Two operators | Chargeback after payout: proposal, self-approval refused, approval, reversal booked | `./scripts/scenarios.sh four-eyes` |
 | Security | No key, another merchant, wrong role, forged and replayed webhooks | `./scripts/scenarios.sh security` |
+| Outbound key | Refund and payout each applied once under a key derived from the operation, despite timeouts | `./scripts/scenarios.sh outbound-key-crash` |
+| Three-way reconciliation | Every check between ledger, provider and bank; reconciled only after the credit | `./scripts/scenarios.sh bank-reconciliation` |
+| Fees | 500,000 = 492,000 received + 1,500 provider fee + 6,500 bank charge, as journal lines | `./scripts/scenarios.sh fee-deduction` |
+| Missing credit | In transit inside the window, broken after it, with a treasury-owned break | `./scripts/scenarios.sh missing-credit` |
+| Returned payout | Landed, then returned; both bank lines explained | `./scripts/scenarios.sh returned-payout` |
+| Statement re-import | Twice by hand, re-sent, re-issued: one bank line, one landing | `./scripts/scenarios.sh statement-reimport` |
+| Slow but up | 4,369,000 IDR abandoned and 7,073,000 past the SLO while health says UP; no duplicate charges | `./scripts/scenarios.sh slow-but-up` |
+| Device risk | Block, step-up, and what each step-up threshold costs in fraud and friction | `./scripts/scenarios.sh device-risk` |
+| Chaos | 150 seeded faults against the live app; all 11 money rules hold | `./scripts/scenarios.sh chaos` |
 
 ### Repository overview
 
@@ -369,7 +459,7 @@ PostgreSQL), so every one can be reproduced.
 
 ![Settlement batch](docs/screenshots/07-settlement-batch.png)
 
-### Two-sided reconciliation
+### Provider report against the ledger
 
 ![Reconciliation verdicts](docs/screenshots/08-reconciliation-mismatch.png)
 
@@ -397,12 +487,48 @@ PostgreSQL), so every one can be reproduced.
 
 ![Security](docs/screenshots/14-authentication-and-isolation.png)
 
+### One outbound key per operation
+
+![Outbound key](docs/screenshots/15-outbound-key-crash.png)
+
+### Three-way reconciliation
+
+![Three-way reconciliation](docs/screenshots/16-three-way-reconciliation.png)
+
+### Fees as their own ledger lines
+
+![Fee deduction](docs/screenshots/17-fee-deduction.png)
+
+### A credit that never arrives
+
+![Missing credit](docs/screenshots/18-missing-credit.png)
+
+### A returned payout
+
+![Returned payout](docs/screenshots/19-returned-payout.png)
+
+### The same statement, again and again
+
+![Statement re-import](docs/screenshots/20-statement-reimport.png)
+
+### Slow but up, measured in money
+
+![Slow but up](docs/screenshots/21-slow-but-up.png)
+
+### Device risk as money
+
+![Device risk](docs/screenshots/22-device-risk.png)
+
+### Chaos against the running app
+
+![Chaos](docs/screenshots/23-chaos-money-rules.png)
+
 ---
 
 ## API
 
-Every endpoint needs `Authorization: Bearer <key>` except health, the signed webhook and the provider
-simulator. **M** = merchant key (own payments only), **O** = operator key.
+Every endpoint needs `Authorization: Bearer <key>` except health, the signed webhook and the simulators (which
+check their own keys). **M** = merchant key (own payments only), **O** = operator key.
 
 ### Merchants
 
@@ -417,10 +543,12 @@ simulator. **M** = merchant key (own payments only), **O** = operator key.
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| POST | `/api/payment-intents` | M | Requires `Idempotency-Key`. Merchant taken from the key. **201** + `Location`; **200** + `Idempotent-Replayed: true` on replay; **422** `IDEMPOTENCY_KEY_REUSED` if the payload differs |
-| POST | `/api/payment-intents/{id}/start` | M, O | Retrying a start is a no-op |
+| POST | `/api/payment-intents` | M | Requires `Idempotency-Key`. Merchant taken from the key. Optional `action` (`PHYSICAL_GOODS`, `DIGITAL_GOODS`, `STORED_VALUE`) and `riskEvidence` (the device's signals, see [ADR 028](docs/adr/028-device-risk-as-money.md)). **201** + `Location`, in state `CREATED`, `REQUIRES_CONFIRMATION` (with `requiredConfirmation`) or `BLOCKED`; **200** + `Idempotent-Replayed: true` on replay, with the first decision; **422** `IDEMPOTENCY_KEY_REUSED` if the payload differs |
+| POST | `/api/payment-intents/{id}/start` | M, O | Retrying a start is a no-op. **409** `STEP_UP_REQUIRED` before a step-up is confirmed; **422** `PAYMENT_BLOCKED` |
+| POST | `/api/payment-intents/{id}/confirm` | M | Body `{method}`: the step-up confirmation the shop verified (`STEP_UP_KEY` or `TAP`, as required); **422** `CONFIRMATION_METHOD_MISMATCH`. Repeating it is a no-op |
+| POST | `/api/payment-intents/{id}/cancel` | M, O | Body `{reason}` (for example `ABANDONED`), only before the customer paid. Repeating it is a no-op |
 | GET | `/api/payment-intents/{id}` | M, O | Another merchant's payment is **404** |
-| GET | `/api/payment-intents/{id}/case-file` | O | Attention summary, provider transactions, events (webhook or poll), provider calls, refunds, settlement items, ledger journals, review cases, audit chain verification, timeline |
+| GET | `/api/payment-intents/{id}/case-file` | O | Attention summary, settlement certainty per stage, device-risk decision, provider transactions, events (webhook or poll), provider calls, refunds, settlement items, ledger journals, review cases, audit chain verification, timeline |
 
 ### Provider webhook
 
@@ -455,9 +583,31 @@ simulator. **M** = merchant key (own payments only), **O** = operator key.
 | GET | `/api/settlements/batches/{batchId}/items` | O | Signed items: `CAPTURE`, `REFUND`, `REVERSAL` |
 | GET | `/api/settlements/backlog` | O | What the next batches would pay, per merchant and currency |
 | GET | `/api/ledger/balances?merchantId=&currency=` | O | Account balances and what is owed to each merchant |
-| GET | `/api/ledger/journals?paymentIntentId=` | O | Journals with their postings |
+| GET | `/api/ledger/journals?paymentIntentId=` or `?reference=` | O | Journals with their postings; `reference` is, for example, a settlement batch id |
 | GET | `/api/ledger/invariants` | O | Runs the books-versus-operations check |
-| POST | `/api/reconciliation/reports` | O | Up to 1000 rows (optionally with `refundedAmount`). With `settlementDate` (and optionally `merchantId`), payouts missing from the report are flagged. Verdicts: `RECONCILED`, `ALREADY_RECONCILED`, `MATCHED_NO_ACTION`, `MISMATCH`, `NOT_FOUND_LOCALLY`, `DUPLICATE_ROW`, `MISSING_FROM_REPORT` |
+| POST | `/api/reconciliation/reports` | O | Up to 1000 rows (optionally with `refundedAmount`) and the provider's `payouts`. With `settlementDate` (and optionally `merchantId`), payouts missing from the report are flagged. Verdicts: `RECONCILED`, `MATCHED_AWAITING_BANK`, `ALREADY_RECONCILED`, `MATCHED_NO_ACTION`, `MISMATCH`, `NOT_FOUND_LOCALLY`, `DUPLICATE_ROW`, `MISSING_FROM_REPORT` |
+
+### Bank statements and three-way reconciliation
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| POST | `/api/bank/statements` | O | One camt.053 file (`application/xml`). **200** `IMPORTED` or `ALREADY_IMPORTED`; **409** `CONFLICT` (same id or number, other content; a break is opened); **422** `BANK_STATEMENT_INVALID` |
+| POST | `/api/bank/statements/pull` | O | Download and import every statement the bank has that is not complete here yet (also runs every minute) |
+| GET | `/api/bank/statements`, `/api/bank/lines?status=` | O | Imported statements (number, date, balances, entries); lines with their match status (`MATCHED`, `SUSPENSE`, `RETURN`, `CLEARED`) |
+| POST | `/api/reconciliation/three-way/run` | O | Match suspense lines, declare missing credits, reconcile payments (also runs every 5 minutes) |
+| GET | `/api/reconciliation/three-way/batches/{batchId}` | O | One payout seen three ways: ledger, provider, bank lines, every check, its breaks |
+| GET | `/api/reconciliation/breaks?status=&category=&batchId=` | O | Breaks with owner, amount, suspense, age, due time, overdue and allowed actions |
+| POST | `/api/reconciliation/breaks/{id}/resolve` | O | Body `{action, batchId, note}`: `ASSIGN_TO_BATCH` (an unmatched or late credit; the amount must still match) or `ACKNOWLEDGE` (only breaks that hold no money); **422** `BREAK_ACTION_NOT_APPLICABLE` |
+
+### Device risk
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| GET | `/api/risk/decisions/{paymentIntentId}` | O | Decision, rule, points by component, signals, reported and recomputed level, outcome, label |
+| POST | `/api/risk/outcomes` | O | Labels learned later: `{outcomes: [{paymentIntentId, label: FRAUD\|LEGITIMATE, source}]}` |
+| POST | `/api/risk/expire-unconfirmed?olderThanSeconds=` | O | Expire step-ups nobody confirmed (the sweeper does this on its own) |
+| GET | `/api/risk/report?currency=&merchantId=` | O | Allowed, stepped up (confirmed, abandoned, waiting), blocked; fraud stopped, fraud loss, friction, precision, recall; per rule |
+| GET | `/api/risk/threshold-sweep?parameter=STEP_UP\|BLOCK&from=&to=&merchantId=` | O | Each threshold value re-decided from stored points, with fraud loss and friction |
 
 ### Review cases
 
@@ -475,12 +625,29 @@ simulator. **M** = merchant key (own payments only), **O** = operator key.
 |---|---|---|---|
 | GET | `/api/audit-events?paymentIntentId=` or `?aggregateType=&aggregateId=` | O | |
 | GET | `/api/audit-events/verify?paymentIntentId=` or `?chainKey=` | O | Recomputes the hash chain; reports the first broken event |
-| GET | `/api/operations/summary` | O | Payments per state, stuck payments, review queue (unresolved, awaiting approval, by reason, oldest), refunds, provider calls, settlement backlog, last ledger check |
+| GET | `/api/operations/summary` | O | Payments per state, stuck payments, review queue (unresolved, awaiting approval, by reason, oldest), refunds, provider calls, settlement backlog, last ledger check, money at risk |
+| GET | `/api/operations/money-at-risk?merchantId=` | O | Every kind of money at risk as counts and amounts, for everything or one merchant |
+| GET | `/api/operations/invariants` | O | Every money rule checked now, with the evidence of each violation |
 | POST | `/api/operations/sweeps/payment-status?olderThanSeconds=` | O | Ask the provider about waiting payments now |
 | GET | `/actuator/prometheus`, `/actuator/metrics` | O | `/actuator/health` (and liveness/readiness) is public |
 
 Every operator `POST` accepts an optional `Idempotency-Key`: the first response is stored for 24 hours and
-replayed with `Idempotent-Replayed: true`.
+replayed with `Idempotent-Replayed: true`. The full key contract is in [docs/idempotency-keys.md](docs/idempotency-keys.md).
+
+### Simulations and simulators (local only)
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/simulations/checkout-runs` (O) | Seeded customers through the real API: `{seed, phase, merchantApiKey, providerSlow, holdWebhooks, customers, keyStrategy}` |
+| POST | `/api/simulations/risk-runs` (O) | Labelled honest and fraudulent customers with device evidence: `{seed, phase, merchantApiKey, customers}` |
+| POST | `/api/simulations/chaos-runs` (O) | A seeded sequence of faults, then every money rule: `{seed, steps, merchantApiKey}` |
+| PUT / DELETE | `/provider-sim/v1/latency` | Make the provider slow (page, payment answer, held webhooks) while it stays up; recover |
+| POST / DELETE | `/provider-sim/v1/faults` | Outages, commit-then-timeout and refusals for refunds, reversals and payouts |
+| GET | `/provider-sim/v1/requests?idempotencyKey=` | What the provider saw under one key: applied, replayed, refused, unavailable |
+| GET | `/provider-sim/v1/reports/settlement?date=` | The provider's settlement report, ready for `POST /api/reconciliation/reports` |
+| GET | `/bank-sim/v1/accounts`, `/bank-sim/v1/statements/{id}` | The settlement account and its camt.053 statements |
+| POST | `/bank-sim/v1/days/close` | Close business days through a date, issuing a statement for each |
+| POST / DELETE | `/bank-sim/v1/faults` | `LATE_CREDIT`, `DROP_CREDIT`, `DUPLICATE_CREDIT`, `NET_OF_FEES`, `WRONG_REFERENCE`, `MISSING_REFERENCE`, `RETURN_PAYOUT`, `RESEND_STATEMENT` |
 
 ### Errors
 
@@ -551,15 +718,23 @@ show one refund.
 | Status sweeper | a lost webhook delays a payment, it does not strand it | [022](docs/adr/022-status-sweeper.md) |
 | Alerts on money, with dead man's switches | an alert that silently stops working is worse than none | [023](docs/adr/023-alerting.md) |
 | Flyway, Java data migrations, vendor safeguards | reviewable schema; upgrades keep the books consistent | [012](docs/adr/012-schema-migrations.md) |
+| Keys end to end: canonical fingerprint, scope, expiry; outbound keys derived once | a retry is recognized however it is serialized; a resend never becomes a second payment | [024](docs/adr/024-idempotency-keys-end-to-end.md) |
+| The bank statement as the third leg | the provider's word is a claim; only a matched bank credit is cash, and every disagreement gets an owner | [025](docs/adr/025-bank-statement-three-way-reconciliation.md) |
+| Money rules as production code, tested with random histories | incidents are combinations nobody wrote a test for | [026](docs/adr/026-property-based-money-invariants.md) |
+| Slowness measured as money | "slow but up" passes every health check while customers leave | [027](docs/adr/027-slowness-as-money.md) |
+| Device risk decided on the server, measured as money | the device can lie; the server knows the amount; every threshold has a price | [028](docs/adr/028-device-risk-as-money.md) |
 
 ---
 
 ## Operations
 
-- **Background jobs**: outbox worker and simulated webhook delivery (1 s), status sweeper and ledger check
-  (5 min), idempotency cleanup (1 h), gauge refresh (30 s). `payflow.workers.enabled=false` turns them all off.
+- **Background jobs**: outbox worker and simulated webhook delivery (1 s), bank statement pull (1 min), status
+  sweeper (which also expires unconfirmed step-ups), ledger check and three-way reconciliation (5 min),
+  idempotency cleanup (1 h), gauge refresh (30 s). `payflow.workers.enabled=false` turns them all off.
 - **Metrics**: `payflow.outbox.*`, `payflow.review.queue.*`, `payflow.payments.stuck`,
-  `payflow.ledger.invariant.*`, `payflow.webhook.*`, `payflow.sweeper.*`, plus the standard HTTP, JVM and pool metrics.
+  `payflow.ledger.invariant.*`, `payflow.webhook.*`, `payflow.sweeper.*`, `payflow.reconciliation.breaks.*`,
+  `payflow.payouts.broken`, `payflow.bank.statement.import.age`, `payflow.money.at.risk.*`,
+  `payflow.payment.confirmations`, `payflow.risk.*`, `payflow.health.up`, plus the standard HTTP, JVM and pool metrics.
 - **Alerts**: [`ops/prometheus/alerts.yml`](ops/prometheus/alerts.yml), validated by `promtool` in CI and by a
   test against the real metrics output. Each alert links to its section in the [runbook](docs/runbook.md).
 - **Tracing**: trace and span ids on every log line and propagated on provider calls (OpenTelemetry bridge;
@@ -571,6 +746,9 @@ show one refund.
 
 ## Documentation Map
 
+- [Settlement Certainty](docs/settlement-certainty.md): the money from capture to the bank, slowness and device
+  risk as money, and how it is all tested together
+- [Idempotency Keys: the client contract](docs/idempotency-keys.md)
 - [Demo Flow](docs/demo-flow.md)
 - [Architecture Flow](docs/architecture-flow.md)
 - [Failure Scenarios](docs/failure-scenarios.md), each with the test that proves it
@@ -602,19 +780,30 @@ Intentional omissions, and what a production deployment would add:
 - static API keys instead of an identity provider with short-lived tokens and MFA; no rate limiting (a gateway's job)
 - the audit chain detects edits but a database superuser could rewrite a whole chain; anchoring chain heads in
   write-once storage closes that
-- one provider, one platform account; multi-provider routing is out of scope
+- one provider, one settlement account per currency; multi-provider routing, FX and payouts on to each merchant's
+  own bank are out of scope
+- the bank is simulated and speaks a subset of camt.053; intraday and notification messages are not handled
+- simulated customers and fraudsters are models with documented parameters, never data; device risk decides per
+  payment, without velocity rules across attempts
 - no multi-region behavior or message broker; the outbox is the seam where one would go
+
+The full list for the settlement and risk work is in [Settlement certainty: honest limits](docs/settlement-certainty.md#6-honest-limits).
 
 ---
 
 ## What To Review First
 
-1. Run `./scripts/demo-readable.sh`, then `./scripts/scenarios.sh provider-outage`
-2. `OutboxWorker`: leases, calls outside transactions, lookup before resend, escalation
+1. Read [Settlement certainty](docs/settlement-certainty.md), run `./scripts/demo-readable.sh`, then
+   `./scripts/scenarios.sh bank-reconciliation` and `./scripts/scenarios.sh chaos`
+2. `OutboxWorker`: leases, calls outside transactions, lookup before resend, escalation, keys derived once
 3. `ProviderWebhookService`: the decision order and why each outcome has its status code
 4. `LedgerService` and `LedgerInvariantService`: balanced journals and the books-versus-operations check
 5. `ReviewWorkflowService`: decisions and two-person approval
 6. `SettlementService`: net payouts, lock order, and the re-check after locking
-7. `OutboxTest`, `SettlementTest`, `LegacyDataMigrationTest`
+7. `PayoutMatcher`, `ThreeWayReconciliationService` and `BankStatementImportService`: what lands a payout and what
+   becomes a break
+8. `RiskPolicy` and `RiskService`: the decision, the hold and the evidence
+9. `MoneyInvariantService` and `MoneyInvariantPropertyTest`: the rules and the random histories that test them
+10. `OutboxTest`, `ThreeWayReconciliationTest`, `DeviceRiskFlowTest`, `LegacyDataMigrationTest`
 
 The core idea: a small backend that stays correct when the world around it misbehaves, and can prove it.
