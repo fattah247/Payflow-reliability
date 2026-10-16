@@ -12,10 +12,19 @@ import java.util.UUID;
 public class OperationsController {
     private final OperationsService operationsService;
     private final PaymentStatusSweeper sweeper;
+    private final MoneyInvariantService moneyInvariantService;
 
-    public OperationsController(OperationsService operationsService, PaymentStatusSweeper sweeper) {
+    public OperationsController(OperationsService operationsService, PaymentStatusSweeper sweeper,
+                                MoneyInvariantService moneyInvariantService) {
         this.operationsService = operationsService;
         this.sweeper = sweeper;
+        this.moneyInvariantService = moneyInvariantService;
+    }
+
+    /** Checks every money rule now, in one snapshot, with the evidence of each violation. */
+    @GetMapping("/api/operations/invariants")
+    public MoneyInvariantService.Report invariants() {
+        return moneyInvariantService.check();
     }
 
     @GetMapping("/api/payment-intents/{paymentIntentId}/case-file")
