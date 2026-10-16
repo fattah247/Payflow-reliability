@@ -38,12 +38,18 @@ public enum ErrorCode {
     /** The same Idempotency-Key is still being processed by another request. */
     IDEMPOTENCY_KEY_IN_PROGRESS(HttpStatus.CONFLICT, true),
     OUTBOX_COMMAND_NOT_RETRYABLE(HttpStatus.CONFLICT, false),
+    /** The payment waits for the customer's step-up confirmation before it can start. */
+    STEP_UP_REQUIRED(HttpStatus.CONFLICT, false),
 
     IDEMPOTENCY_KEY_REUSED(HttpStatus.UNPROCESSABLE_ENTITY, false),
     REFUND_AMOUNT_NOT_ALLOWED(HttpStatus.UNPROCESSABLE_ENTITY, false),
     SETTLEMENT_CURRENCY_REQUIRED(HttpStatus.UNPROCESSABLE_ENTITY, false),
     RESOLUTION_ACTION_NOT_APPLICABLE(HttpStatus.UNPROCESSABLE_ENTITY, false),
     MERCHANT_INACTIVE(HttpStatus.UNPROCESSABLE_ENTITY, false),
+    /** The device-risk policy blocked this payment; it will never be handed to the provider. */
+    PAYMENT_BLOCKED(HttpStatus.UNPROCESSABLE_ENTITY, false),
+    /** A step-up confirmed with another method than the one the decision required. */
+    CONFIRMATION_METHOD_MISMATCH(HttpStatus.UNPROCESSABLE_ENTITY, false),
     /** A bank statement file that is not well-formed, not camt.053, or does not add up. */
     BANK_STATEMENT_INVALID(HttpStatus.UNPROCESSABLE_ENTITY, false),
     /** A statement id or sequence number already imported, with different content. */

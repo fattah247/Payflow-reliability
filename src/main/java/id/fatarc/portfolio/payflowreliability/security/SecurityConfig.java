@@ -55,6 +55,8 @@ public class SecurityConfig implements WebMvcConfigurer {
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents").hasRole(MERCHANT)
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents/*/start").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents/*/cancel").hasAnyRole(MERCHANT, OPERATOR)
+                        // Only the shop can relay the customer's confirmation: an operator confirming a step-up would defeat it.
+                        .requestMatchers(HttpMethod.POST, "/api/payment-intents/*/confirm").hasRole(MERCHANT)
                         .requestMatchers(HttpMethod.GET, "/api/payment-intents/*").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.POST, "/api/refunds/payment-intents/*").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.GET, "/api/refunds/**").hasAnyRole(MERCHANT, OPERATOR)

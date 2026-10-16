@@ -2,6 +2,13 @@ package id.fatarc.portfolio.payflowreliability.payment;
 
 public enum PaymentState {
     CREATED,
+    /**
+     * Device risk asked for a step-up: the payment waits for the customer's confirmation (or expires) before it can
+     * be started. Never handed to the provider until confirmed.
+     */
+    REQUIRES_CONFIRMATION,
+    /** Device risk blocked it. Final: never started, never handed to the provider. */
+    BLOCKED,
     PENDING,
     AUTHORIZED,
     SUCCESS,

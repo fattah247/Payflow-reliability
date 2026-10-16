@@ -1,6 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
 import id.fatarc.portfolio.payflowreliability.payment.dto.CancelPaymentIntentRequest;
+import id.fatarc.portfolio.payflowreliability.payment.dto.ConfirmStepUpRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.PaymentIntentResponse;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
@@ -40,6 +41,13 @@ public class PaymentIntentController {
     @PostMapping("/{paymentIntentId}/start")
     public PaymentIntentResponse start(@PathVariable UUID paymentIntentId, Caller caller) {
         return PaymentIntentResponse.from(paymentIntentService.start(paymentIntentId, caller));
+    }
+
+    /** The customer confirmed a device-risk step-up with the method the decision required. Repeating it is a no-op. */
+    @PostMapping("/{paymentIntentId}/confirm")
+    public PaymentIntentResponse confirm(@PathVariable UUID paymentIntentId, @Valid @RequestBody ConfirmStepUpRequest request,
+                                         Caller caller) {
+        return PaymentIntentResponse.from(paymentIntentService.confirm(paymentIntentId, request.method(), caller));
     }
 
     /** Withdraws a payment the customer has not paid, for example an abandoned checkout. Repeating it is a no-op. */

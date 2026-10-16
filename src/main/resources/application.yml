@@ -107,6 +107,22 @@ payflow:
     confirmation-slo: 10s
     slo-objective: 0.95
     abandonment-window: 15m
+  # The device-risk reference policy (ADR 028). Points come from the device's signals (LOW 1, MEDIUM 2, HIGH 3, as the
+  # device app weighs them), the amount and what is being bought. With amount and action points at zero it decides
+  # exactly like the app's own gate.
+  risk:
+    step-up-threshold: 2
+    block-threshold: 5
+    block-on-severe-signal: true
+    # IDR amounts from which one more point is added.
+    amount-steps: 1000000, 5000000
+    action-points:
+      PHYSICAL_GOODS: 0
+      DIGITAL_GOODS: 1
+      STORED_VALUE: 2
+    # Shops that send no device evidence (server-to-server) are not penalised by default.
+    missing-evidence-points: 0
+    confirmation-timeout: 10m
   # Simulated customers for local demos (ADR 027). Every value is a model assumption, not observed behaviour.
   loadgen:
     checkout:

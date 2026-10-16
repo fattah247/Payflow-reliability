@@ -12,6 +12,8 @@ import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -30,7 +32,11 @@ public class MoneyAtRiskService {
         /** Checkouts the customer gave up on within the abandonment window. */
         ABANDONED,
         /** A merchant reference charged more than once: the extra charges (should always be zero). */
-        DUPLICATE_CHARGES
+        DUPLICATE_CHARGES,
+        /** Stepped up by device risk, waiting for the customer's confirmation. */
+        AWAITING_CONFIRMATION,
+        /** Blocked by device risk since the start of the day. */
+        BLOCKED_TODAY
     }
 
     /**
@@ -98,6 +104,17 @@ public class MoneyAtRiskService {
         }
         duplicates.addAll(byCurrency.values());
         items.add(item(Kind.DUPLICATE_CHARGES, "Extra charges for a merchant reference already charged", duplicates, null));
+
+        items.add(item(Kind.AWAITING_CONFIRMATION, "Payments waiting for a device-risk step-up confirmation",
+                entityManager.createQuery("""
+                        select p.currency, count(p), sum(p.amount) from PaymentIntent p
+                        where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.REQUIRES_CONFIRMATION
+                        group by p.currency""", Object[].class).getResultList(), null));
+        Instant startOfDay = LocalDate.ofInstant(now, ZoneId.systemDefault()).atStartOfDay(ZoneId.systemDefault()).toInstant();
+        items.add(item(Kind.BLOCKED_TODAY, "Payments blocked by device risk today", entityManager.createQuery("""
+                        select d.currency, count(d), sum(d.amount) from RiskDecision d
+                        where d.decision = id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType.BLOCK and d.decidedAt >= :since
+                        group by d.currency""", Object[].class).setParameter("since", startOfDay).getResultList(), null));
         return new MoneyAtRisk(now, List.copyOf(items));
     }
 

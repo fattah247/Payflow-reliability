@@ -8,6 +8,8 @@ import id.fatarc.portfolio.payflowreliability.common.DatabaseErrors;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
 import id.fatarc.portfolio.payflowreliability.merchant.MerchantService;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
+import id.fatarc.portfolio.payflowreliability.risk.RequiredConfirmation;
+import id.fatarc.portfolio.payflowreliability.risk.RiskService;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -25,6 +27,7 @@ public class PaymentIntentService {
     private final MerchantService merchantService;
     private final AuditService auditService;
     private final CheckoutMetrics checkoutMetrics;
+    private final RiskService riskService;
     private final Clock clock;
     private final TransactionTemplate transactionTemplate;
 
@@ -32,12 +35,14 @@ public class PaymentIntentService {
                                 MerchantService merchantService,
                                 AuditService auditService,
                                 CheckoutMetrics checkoutMetrics,
+                                RiskService riskService,
                                 Clock clock,
                                 PlatformTransactionManager transactionManager) {
         this.paymentIntentRepository = paymentIntentRepository;
         this.merchantService = merchantService;
         this.auditService = auditService;
         this.checkoutMetrics = checkoutMetrics;
+        this.riskService = riskService;
         this.clock = clock;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
@@ -72,12 +77,23 @@ public class PaymentIntentService {
         }
     }
 
-    /** Starting an already-started payment returns it unchanged, so a retried start is safe. */
+    /**
+     * Starting an already-started payment returns it unchanged, so a retried start is safe. A payment waiting for a
+     * step-up or blocked by device risk is never started: that is what keeps it away from the provider.
+     */
     @Transactional
     public PaymentIntent start(UUID paymentIntentId, Caller caller) {
         PaymentIntent intent = lockAccessible(paymentIntentId, caller);
         if (intent.getState() == PaymentState.PENDING) {
             return intent;
+        }
+        if (intent.getState() == PaymentState.REQUIRES_CONFIRMATION) {
+            throw new BusinessException(ErrorCode.STEP_UP_REQUIRED,
+                    "Payment " + paymentIntentId + " needs the customer's step-up confirmation before it can start.");
+        }
+        if (intent.getState() == PaymentState.BLOCKED) {
+            throw new BusinessException(ErrorCode.PAYMENT_BLOCKED,
+                    "Payment " + paymentIntentId + " was blocked by the device-risk policy and will not be sent to the provider.");
         }
         PaymentState previousState = intent.start(clock.instant());
         auditService.recordStateChange(intent.getId(), previousState, intent.getState(), caller.name(),
@@ -95,12 +111,24 @@ public class PaymentIntentService {
         if (intent.getState() == PaymentState.CANCELLED) {
             return intent;
         }
+        boolean awaitingStepUp = intent.getState() == PaymentState.REQUIRES_CONFIRMATION;
         PaymentState previousState = intent.cancel(reason, clock.instant());
+        if (awaitingStepUp) {
+            riskService.onCancelledBeforeConfirmation(intent);
+        }
         auditService.recordStateChange(intent.getId(), previousState, intent.getState(), caller.name(),
                 "Payment cancelled before the customer paid.", "reason=" + reason);
         if (reason == CancellationReason.ABANDONED) {
             checkoutMetrics.abandoned(intent);
         }
+        return intent;
+    }
+
+    /** The customer confirmed the device-risk step-up (the shop's backend verified the device's signature). */
+    @Transactional
+    public PaymentIntent confirm(UUID paymentIntentId, RequiredConfirmation method, Caller caller) {
+        PaymentIntent intent = lockAccessible(paymentIntentId, caller);
+        riskService.confirm(intent, method, caller.name());
         return intent;
     }
 
@@ -146,19 +174,23 @@ public class PaymentIntentService {
                             request.merchantReference(),
                             request.amount(),
                             request.currency(),
-                            idempotencyKey
+                            idempotencyKey,
+                            request.action()
                     ));
                     auditService.record(AggregateType.PAYMENT_INTENT, created.getId().toString(), created.getId(),
                             "PAYMENT_INTENT_CREATED", caller.name(),
                             "Payment intent created for merchant reference " + request.merchantReference(),
                             "idempotencyKey=" + idempotencyKey);
+                    // Decided once, on the first attempt: a retry is answered with this decision, whatever it carries.
+                    riskService.decide(created, request.riskEvidence(), caller.name());
                     return new PaymentIntentCreation(created, false);
                 });
     }
 
     private PaymentIntent replay(PaymentIntent intent, CreatePaymentIntentRequest request, String idempotencyKey,
                                  Caller caller) {
-        if (!intent.matchesFingerprint(PaymentIntent.fingerprintOf(request.merchantReference(), request.amount(), request.currency()))) {
+        if (!intent.matchesFingerprint(PaymentIntent.fingerprintOf(request.merchantReference(), request.amount(), request.currency(),
+                request.action()))) {
             throw new BusinessException(ErrorCode.IDEMPOTENCY_KEY_REUSED,
                     "Idempotency key " + idempotencyKey + " was already used for a different request payload.");
         }

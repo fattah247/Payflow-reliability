@@ -22,6 +22,7 @@ import id.fatarc.portfolio.payflowreliability.review.ReviewService;
 import id.fatarc.portfolio.payflowreliability.review.ReviewStatus;
 import id.fatarc.portfolio.payflowreliability.review.ReviewWorkflowService;
 import id.fatarc.portfolio.payflowreliability.review.dto.ReviewCaseView;
+import id.fatarc.portfolio.payflowreliability.risk.RiskService;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -52,6 +53,7 @@ public class OperationsService {
     private final AuditChainVerifier auditChainVerifier;
     private final SettlementCertaintyService certaintyService;
     private final MoneyAtRiskService moneyAtRiskService;
+    private final RiskService riskService;
     private final Clock clock;
     private final Duration stuckAfter;
 
@@ -71,6 +73,7 @@ public class OperationsService {
                              AuditChainVerifier auditChainVerifier,
                              SettlementCertaintyService certaintyService,
                              MoneyAtRiskService moneyAtRiskService,
+                             RiskService riskService,
                              Clock clock,
                              @Value("${payflow.sweeper.stuck-after:15m}") Duration stuckAfter) {
         this.paymentIntentService = paymentIntentService;
@@ -89,6 +92,7 @@ public class OperationsService {
         this.auditChainVerifier = auditChainVerifier;
         this.certaintyService = certaintyService;
         this.moneyAtRiskService = moneyAtRiskService;
+        this.riskService = riskService;
         this.clock = clock;
         this.stuckAfter = stuckAfter;
     }
@@ -104,6 +108,7 @@ public class OperationsService {
                 PaymentIntentResponse.from(intent),
                 attention(intent, refunds, calls, reviewCases),
                 certaintyService.payment(paymentIntentId),
+                riskService.decisionFor(paymentIntentId).orElse(null),
                 paymentTransactionRepository.findByPaymentIntentIdOrderByCreatedAtAsc(paymentIntentId),
                 providerEventRepository.findByPaymentIntentIdOrderByReceivedAtAsc(paymentIntentId),
                 calls,
@@ -170,6 +175,9 @@ public class OperationsService {
 
         String waitingOn = switch (intent.getState()) {
             case CREATED -> "Merchant to start the payment.";
+            case REQUIRES_CONFIRMATION -> "Customer to confirm the device-risk step-up; the payment cannot start before that "
+                    + "and expires if nobody confirms.";
+            case BLOCKED -> "Nothing: blocked by the device-risk policy; it was never handed to the provider.";
             case PENDING -> "Provider event with the payment result (the status sweeper asks the provider if it never arrives).";
             case AUTHORIZED -> "Provider capture (SUCCESS) or failure.";
             case SUCCESS -> "Next settlement batch for merchant " + intent.getMerchantId() + " in " + intent.getCurrency() + ".";

@@ -99,7 +99,7 @@ public abstract class IntegrationTest {
             "bank_statement_lines", "bank_statements", "bank_accounts", "sim_payout_items", "sim_payouts", "bank_sim_entries",
             "bank_sim_statements", "bank_sim_accounts", "settlement_batch_items", "settlement_batches", "ledger_postings",
             "ledger_journals", "outbox_commands", "provider_events", "refund_requests", "review_cases",
-            "payment_transactions", "audit_events", "idempotency_records", "payment_intents", "merchant_api_keys",
+            "payment_transactions", "audit_events", "idempotency_records", "risk_decisions", "payment_intents", "merchant_api_keys",
             "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments", "sim_api_requests");
 
     @Autowired protected MockMvc mockMvc;
