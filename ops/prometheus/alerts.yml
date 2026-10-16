@@ -52,6 +52,35 @@ groups:
           summary: "More than 20% of provider calls end without a definite answer"
           runbook: docs/runbook.md#provider-calls-failing
 
+  - name: payflow-settlement-certainty
+    rules:
+      - alert: PayflowReconciliationBreaksOverdue
+        expr: payflow_reconciliation_breaks_overdue > 0
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} reconciliation break(s) between ledger, provider and bank are past their due time"
+          runbook: docs/runbook.md#reconciliation-breaks-overdue
+
+      - alert: PayflowReconciliationNotRunning
+        expr: payflow_reconciliation_check_age_seconds > 1800
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The three-way reconciliation has not run for over 30 minutes"
+          runbook: docs/runbook.md#reconciliation-not-running
+
+      - alert: PayflowBankStatementsNotArriving
+        expr: payflow_bank_statement_import_age_seconds > 129600
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "No bank statement imported for 36 hours: payouts cannot be confirmed or declared missing"
+          runbook: docs/runbook.md#bank-statements-not-arriving
+
   - name: payflow-flow
     rules:
       - alert: PayflowPaymentsStuck

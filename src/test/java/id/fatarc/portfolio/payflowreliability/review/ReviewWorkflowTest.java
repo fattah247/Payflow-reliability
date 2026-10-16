@@ -101,7 +101,7 @@ class ReviewWorkflowTest extends IntegrationTest {
         assertThat(proposed.status()).isEqualTo(ReviewStatus.AWAITING_APPROVAL);
         assertThat(proposed.proposedBy()).isEqualTo("operator:ops-ana");
         assertThat(stateOf(intent)).as("nothing happens on a proposal").isEqualTo(PaymentState.MANUAL_REVIEW);
-        assertThat(outboxCommandRepository.count()).isZero();
+        assertThat(outboxCommandRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId())).isEmpty();
 
         assertThatThrownBy(() -> reviewWorkflowService.approve(reviewCase.id(), "looks right", OPS_ANA))
                 .isInstanceOf(BusinessException.class)
@@ -115,7 +115,8 @@ class ReviewWorkflowTest extends IntegrationTest {
         assertThat(approved.status()).isEqualTo(ReviewStatus.RESOLVED);
         assertThat(approved.approvedBy()).isEqualTo("operator:ops-budi");
         assertThat(stateOf(intent)).isEqualTo(PaymentState.REVERSAL_REQUIRED);
-        assertThat(outboxCommandRepository.findAll()).singleElement().extracting("commandType").isEqualTo(CommandType.REVERSAL);
+        assertThat(outboxCommandRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId())).singleElement()
+                .extracting("commandType").isEqualTo(CommandType.REVERSAL);
 
         drainOutbox();
         assertThat(reload(intent).getState()).isEqualTo(PaymentState.REVERSED);
@@ -189,7 +190,7 @@ class ReviewWorkflowTest extends IntegrationTest {
 
         assertThat(reload(refund).getStatus()).isEqualTo(RefundStatus.REJECTED);
         assertThat(stateOf(intent)).isEqualTo(PaymentState.RECONCILED);
-        assertThat(outboxCommandRepository.count()).isZero();
+        assertThat(outboxCommandRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId())).isEmpty();
     }
 
     @Test

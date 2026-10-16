@@ -49,6 +49,14 @@ public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UU
 
     long countByStateInAndUpdatedAtBefore(Collection<PaymentState> states, Instant updatedBefore);
 
+    /** Settled payments the provider's report has confirmed: reconciled as soon as their payout lands. */
+    @Query("""
+            select p.id from PaymentIntent p
+            where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.SETTLED
+              and p.providerReportMatchedAt is not null
+            order by p.id""")
+    List<UUID> findSettledWithProviderConfirmation();
+
     @Query("select p.state as state, count(p) as paymentCount from PaymentIntent p group by p.state")
     List<StateCount> countByState();
 

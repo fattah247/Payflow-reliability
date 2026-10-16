@@ -12,7 +12,9 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
 import java.net.http.HttpClient;
+import java.time.LocalDate;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -69,6 +71,23 @@ public class HttpPaymentProviderClient implements PaymentProviderClient {
     }
 
     @Override
+    public ProviderResult payout(String idempotencyKey, String reference, String merchantId, BigDecimal amount,
+                                 String currency, List<String> providerTransactionIds) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("reference", reference);
+        body.put("merchantId", merchantId);
+        body.put("amount", amount);
+        body.put("currency", currency);
+        body.put("providerTransactionIds", providerTransactionIds);
+        return send("/v1/payouts", idempotencyKey, body);
+    }
+
+    @Override
+    public Optional<ProviderResult> findPayout(String idempotencyKey) {
+        return lookup("/v1/payouts/{key}", idempotencyKey);
+    }
+
+    @Override
     public Optional<ProviderPaymentStatus> paymentStatus(UUID paymentIntentId) {
         try {
             JsonNode node = client().get().uri("/v1/payments/{id}", paymentIntentId).retrieve().body(JsonNode.class);
@@ -117,6 +136,11 @@ public class HttpPaymentProviderClient implements PaymentProviderClient {
 
     private static ProviderResult interpret(JsonNode node) {
         String status = node.path("status").asText();
+        if ("SUCCEEDED".equals(status) && node.hasNonNull("netAmount")) {
+            return new ProviderResult.PayoutAccepted(node.path("id").asText(), node.path("grossAmount").decimalValue(),
+                    node.path("feeAmount").decimalValue(), node.path("netAmount").decimalValue(),
+                    LocalDate.parse(node.path("valueDate").asText()));
+        }
         return switch (status) {
             case "SUCCEEDED" -> new ProviderResult.Succeeded(node.path("id").asText(), node.path("amount").decimalValue());
             case "FAILED" -> new ProviderResult.Rejected(node.path("failureReason").asText("refused by provider"), true);

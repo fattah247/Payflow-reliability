@@ -40,6 +40,19 @@ public interface OutboxCommandRepository extends JpaRepository<OutboxCommand, UU
     @Query("select c.paymentIntentId from OutboxCommand c where c.id = :id")
     Optional<UUID> findPaymentIntentIdById(@Param("id") UUID id);
 
+    /** What a command is about (a payment, or a settlement batch for payouts), read before taking any lock. */
+    @Query("select c.commandType as commandType, c.paymentIntentId as paymentIntentId, c.settlementBatchId as settlementBatchId"
+            + " from OutboxCommand c where c.id = :id")
+    Optional<Subject> findSubjectById(@Param("id") UUID id);
+
+    List<OutboxCommand> findBySettlementBatchIdOrderByCreatedAtAsc(UUID settlementBatchId);
+
+    interface Subject {
+        CommandType getCommandType();
+        UUID getPaymentIntentId();
+        UUID getSettlementBatchId();
+    }
+
     List<OutboxCommand> findByPaymentIntentIdOrderByCreatedAtAsc(UUID paymentIntentId);
 
     List<OutboxCommand> findByPaymentIntentIdAndCommandTypeOrderByCreatedAtAsc(UUID paymentIntentId, CommandType commandType);

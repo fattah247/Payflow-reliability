@@ -12,6 +12,7 @@ import id.fatarc.portfolio.payflowreliability.outbox.OutboxCommand;
 import id.fatarc.portfolio.payflowreliability.outbox.OutboxCommandRepository;
 import id.fatarc.portfolio.payflowreliability.payment.*;
 import id.fatarc.portfolio.payflowreliability.payment.dto.PaymentIntentResponse;
+import id.fatarc.portfolio.payflowreliability.reconciliation.SettlementCertaintyService;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequest;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequestRepository;
 import id.fatarc.portfolio.payflowreliability.refund.RefundStatus;
@@ -49,6 +50,7 @@ public class OperationsService {
     private final ReviewCaseRepository reviewCaseRepository;
     private final AuditService auditService;
     private final AuditChainVerifier auditChainVerifier;
+    private final SettlementCertaintyService certaintyService;
     private final Clock clock;
     private final Duration stuckAfter;
 
@@ -66,6 +68,7 @@ public class OperationsService {
                              ReviewCaseRepository reviewCaseRepository,
                              AuditService auditService,
                              AuditChainVerifier auditChainVerifier,
+                             SettlementCertaintyService certaintyService,
                              Clock clock,
                              @Value("${payflow.sweeper.stuck-after:15m}") Duration stuckAfter) {
         this.paymentIntentService = paymentIntentService;
@@ -82,6 +85,7 @@ public class OperationsService {
         this.reviewCaseRepository = reviewCaseRepository;
         this.auditService = auditService;
         this.auditChainVerifier = auditChainVerifier;
+        this.certaintyService = certaintyService;
         this.clock = clock;
         this.stuckAfter = stuckAfter;
     }
@@ -96,6 +100,7 @@ public class OperationsService {
         return new PaymentCaseFile(
                 PaymentIntentResponse.from(intent),
                 attention(intent, refunds, calls, reviewCases),
+                certaintyService.payment(paymentIntentId),
                 paymentTransactionRepository.findByPaymentIntentIdOrderByCreatedAtAsc(paymentIntentId),
                 providerEventRepository.findByPaymentIntentIdOrderByReceivedAtAsc(paymentIntentId),
                 calls,
@@ -164,7 +169,9 @@ public class OperationsService {
             case PENDING -> "Provider event with the payment result (the status sweeper asks the provider if it never arrives).";
             case AUTHORIZED -> "Provider capture (SUCCESS) or failure.";
             case SUCCESS -> "Next settlement batch for merchant " + intent.getMerchantId() + " in " + intent.getCurrency() + ".";
-            case SETTLED -> "Provider settlement report for reconciliation.";
+            case SETTLED -> intent.getProviderReportMatchedAt() == null
+                    ? "Provider settlement report row, and a bank credit landing its payout (three-way reconciliation)."
+                    : "A bank credit landing its payout: the provider's report already matched.";
             case RECONCILED -> "Nothing: the payment is reconciled.";
             case REFUNDED -> "Nothing: the payment is fully refunded.";
             case REVERSAL_REQUIRED -> "Provider to confirm the reversal.";

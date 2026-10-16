@@ -1,11 +1,20 @@
 package id.fatarc.portfolio.payflowreliability.provider;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 
 /** The three outcomes that matter for a call that moves money. */
 public sealed interface ProviderResult {
     /** The provider applied the operation. */
     record Succeeded(String providerReference, BigDecimal amount) implements ProviderResult {
+    }
+
+    /**
+     * The provider accepted a payout and says what will reach the bank: gross minus its fee is the net it sends,
+     * expected to arrive with the given value date. This is the provider's word, not proof of arrival.
+     */
+    record PayoutAccepted(String providerPayoutId, BigDecimal gross, BigDecimal fee, BigDecimal net,
+                          LocalDate expectedValueDate) implements ProviderResult {
     }
 
     /**

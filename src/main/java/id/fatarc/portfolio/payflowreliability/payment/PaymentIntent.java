@@ -72,6 +72,12 @@ public class PaymentIntent {
     /** Last time the status sweeper asked the provider about this payment. */
     private Instant lastProviderCheckAt;
 
+    /**
+     * When a row of the provider's settlement report matched this payment. One of the two pieces of evidence
+     * RECONCILED needs; the other is a bank credit that landed the batch paying it out.
+     */
+    private Instant providerReportMatchedAt;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -230,6 +236,12 @@ public class PaymentIntent {
         this.lastProviderCheckAt = checkedAt;
     }
 
+    public void markProviderReportMatched(Instant matchedAt) {
+        if (providerReportMatchedAt == null) {
+            providerReportMatchedAt = matchedAt;
+        }
+    }
+
     public boolean isOnHold() {
         return state == MANUAL_REVIEW;
     }
@@ -303,6 +315,7 @@ public class PaymentIntent {
     public BigDecimal getRefundedAmount() { return Money.atScale(refundedAmount, currency); }
     public BigDecimal getReversedAmount() { return Money.atScale(reversedAmount, currency); }
     public Instant getLastProviderCheckAt() { return lastProviderCheckAt; }
+    public Instant getProviderReportMatchedAt() { return providerReportMatchedAt; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 }

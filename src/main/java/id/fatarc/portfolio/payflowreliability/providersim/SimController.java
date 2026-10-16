@@ -50,6 +50,10 @@ public class SimController {
     public record ReversalCall(String providerTransactionId, String reference) {
     }
 
+    public record PayoutCall(String reference, String merchantId, BigDecimal amount, String currency,
+                             List<String> providerTransactionIds) {
+    }
+
     public record FaultRequest(SimFaults.Operation operation, SimFaults.Mode mode, Integer times) {
     }
 
@@ -166,6 +170,100 @@ public class SimController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown reversal"));
     }
 
+    /** Pays a settlement batch out to the platform's settlement account, net of the provider's fee. */
+    @PostMapping("/payouts")
+    public ResponseEntity<Map<String, Object>> payout(
+            @RequestHeader(value = "Authorization", required = false) String authorization,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody PayoutCall call) throws InterruptedException {
+        authenticate(authorization);
+        requireKey(idempotencyKey);
+        SimFaults.Mode fault = faults.next(SimFaults.Operation.PAYOUT);
+        List<String> transactions = call.providerTransactionIds() == null ? List.of()
+                : call.providerTransactionIds().stream().sorted().toList();
+        String hash = Hashing.sha256Hex("payout|" + call.reference() + "|" + call.merchantId() + "|"
+                + call.amount().stripTrailingZeros().toPlainString() + "|" + call.currency() + "|" + String.join(",", transactions));
+        if (fault == SimFaults.Mode.UNAVAILABLE) {
+            requestLog.record("PAYOUT", idempotencyKey, hash, SimApiRequest.Outcome.UNAVAILABLE);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Simulated outage");
+        }
+        SimPayout payout;
+        try {
+            payout = simulator.payout(idempotencyKey, hash, call.merchantId(), call.reference(), call.amount(),
+                    call.currency(), transactions, fault == SimFaults.Mode.REJECT);
+        } catch (ResponseStatusException ex) {
+            requestLog.record("PAYOUT", idempotencyKey, hash, SimApiRequest.Outcome.KEY_CONFLICT);
+            throw ex;
+        }
+        requestLog.record("PAYOUT", idempotencyKey, hash, payout.wasReplayed() ? SimApiRequest.Outcome.REPLAYED
+                : payout.getStatus() == SimPayout.Status.FAILED ? SimApiRequest.Outcome.REFUSED : SimApiRequest.Outcome.APPLIED);
+        lateIf(fault);
+        return ResponseEntity.status(HttpStatus.CREATED).body(view(payout));
+    }
+
+    @GetMapping("/payouts/{idempotencyKey}")
+    public Map<String, Object> findPayout(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                          @PathVariable String idempotencyKey) {
+        authenticate(authorization);
+        lookupFault();
+        return simulator.findPayout(idempotencyKey).map(SimController::view)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown payout"));
+    }
+
+    /**
+     * The provider's settlement report for one day, in the format the platform imports
+     * ({@code POST /api/reconciliation/reports}): every transaction settled by that day's payouts, and the
+     * payouts themselves with gross, fee, net and value date.
+     */
+    @GetMapping("/reports/settlement")
+    public Map<String, Object> settlementReport(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                                @RequestParam java.time.LocalDate date) {
+        authenticate(authorization);
+        List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        List<Map<String, Object>> payoutRows = new java.util.ArrayList<>();
+        for (SimPayout payout : simulator.payoutsOn(date)) {
+            if (payout.getStatus() != SimPayout.Status.SUCCEEDED) {
+                continue;
+            }
+            for (String transactionId : payout.getProviderTransactionIds()) {
+                simulator.paymentByTransaction(transactionId).ifPresent(payment -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("providerTransactionId", payment.getProviderTransactionId());
+                    row.put("amount", payment.getAmount());
+                    row.put("currency", payment.getCurrency());
+                    row.put("providerStatus", reportedStatus(payment.getStatus()));
+                    row.put("settlementDate", payout.getPayoutDate());
+                    row.put("refundedAmount", payment.getRefundedAmount());
+                    rows.add(row);
+                });
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("payoutReference", payout.getReference());
+            row.put("providerPayoutId", payout.getId());
+            row.put("grossAmount", payout.getGrossAmount());
+            row.put("feeAmount", payout.getFeeAmount());
+            row.put("netAmount", payout.getNetAmount());
+            row.put("currency", payout.getCurrency());
+            row.put("valueDate", payout.getValueDate());
+            payoutRows.add(row);
+        }
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("settlementDate", date);
+        report.put("rows", rows);
+        report.put("payouts", payoutRows);
+        return report;
+    }
+
+    private static String reportedStatus(SimPayment.Status status) {
+        return switch (status) {
+            case AUTHORIZED -> "AUTHORIZED";
+            case SUCCESS -> "SUCCESS";
+            case FAILED -> "FAILED";
+            case EXPIRED -> "EXPIRED";
+            case VOIDED, REVERSED -> "REVERSAL_REQUIRED";
+        };
+    }
+
     @ExceptionHandler(ResponseStatusException.class)
     public ResponseEntity<Map<String, Object>> handle(ResponseStatusException ex) {
         return ResponseEntity.status(ex.getStatusCode()).body(Map.of("error", String.valueOf(ex.getReason())));
@@ -245,6 +343,21 @@ public class SimController {
         view.put("amount", payment.getAmount());
         view.put("currency", payment.getCurrency());
         view.put("refundedAmount", payment.getRefundedAmount());
+        return view;
+    }
+
+    private static Map<String, Object> view(SimPayout payout) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("id", payout.getId());
+        view.put("type", "PAYOUT");
+        view.put("status", payout.getStatus());
+        view.put("reference", payout.getReference());
+        view.put("grossAmount", payout.getGrossAmount());
+        view.put("feeAmount", payout.getFeeAmount());
+        view.put("netAmount", payout.getNetAmount());
+        view.put("currency", payout.getCurrency());
+        view.put("valueDate", payout.getValueDate());
+        view.put("failureReason", payout.getFailureReason());
         return view;
     }
 

@@ -5,6 +5,7 @@ import id.fatarc.portfolio.payflowreliability.provider.ProviderPaymentStatus;
 import id.fatarc.portfolio.payflowreliability.provider.ProviderResult;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,6 +51,17 @@ public class CrashableProviderClient implements PaymentProviderClient {
     @Override
     public Optional<ProviderResult> findReversal(String idempotencyKey) {
         return delegate.findReversal(idempotencyKey);
+    }
+
+    @Override
+    public ProviderResult payout(String idempotencyKey, String reference, String merchantId, BigDecimal amount, String currency,
+                                 List<String> providerTransactionIds) {
+        return crashIfArmed(delegate.payout(idempotencyKey, reference, merchantId, amount, currency, providerTransactionIds));
+    }
+
+    @Override
+    public Optional<ProviderResult> findPayout(String idempotencyKey) {
+        return delegate.findPayout(idempotencyKey);
     }
 
     @Override

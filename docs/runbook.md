@@ -87,6 +87,58 @@ purpose: money is not returned while the provider contradicts the payment.
 client timeouts (`payflow.provider.connect-timeout`, `read-timeout`). Expect the
 `PayflowProviderCallOutcomeUnknown` alert next if it persists.
 
+<a id="reconciliation-breaks-overdue"></a>
+## PayflowReconciliationBreaksOverdue (page)
+
+**Meaning.** The ledger, the provider's report and the bank statement disagree about at least one payout, and
+the disagreement has been open longer than its window (24 h for missing, returned or refused payouts and
+statement conflicts, 48 h for unexplained or late credits and amount mismatches, 72 h for duplicates and
+provider report differences).
+
+**Why it matters.** Each break is money we cannot account for: a payout that left the provider and did not
+arrive, a credit nobody can explain (held in `bank_suspense`), or a provider report that contradicts our books.
+
+**Do.**
+1. `GET /api/reconciliation/breaks?status=OPEN` lists each break with its category, owner, amount, age and
+   `allowedActions`. `GET /api/reconciliation/three-way/batches/<batchId>` shows the three legs of a payout
+   side by side, with every check and whether it passed.
+2. By owner:
+   - **TREASURY** (`MISSING_CREDIT`, `UNMATCHED_CREDIT`, `UNMATCHED_DEBIT`, `DUPLICATE_CREDIT`, `LATE_CREDIT`,
+     `RETURNED_PAYOUT`, `STATEMENT_CONFLICT`): ask the bank. A late or misreferenced credit that the bank
+     confirms belongs to a payout: `POST /api/reconciliation/breaks/<id>/resolve` with
+     `{"action": "ASSIGN_TO_BATCH", "batchId": "...", "note": "..."}`. The amount is still checked.
+   - **PROVIDER_OPERATIONS** (`PROVIDER_REFUSED_PAYOUT`, `AMOUNT_MISMATCH`, `PROVIDER_PAYOUT_MISMATCH`,
+     `MISSING_FROM_PROVIDER_REPORT`, `UNKNOWN_PROVIDER_PAYOUT`): ask the provider, with the payout reference.
+3. Breaks that hold money in suspense cannot be acknowledged away: they close when the money is explained (a
+   matching bank line, a return, or an assignment). The others can be closed with `ACKNOWLEDGE` and a note
+   once the investigation is done outside the system.
+4. A missing credit that arrives later lands the payout automatically and closes the break.
+
+<a id="reconciliation-not-running"></a>
+## PayflowReconciliationNotRunning (ticket)
+
+**Meaning.** The scheduled three-way reconciliation (suspense retries, missing credits, payments ready to
+reconcile) has not completed for over 30 minutes.
+
+**Do.** Check that background workers are enabled and the database is reachable. Run it on demand:
+`POST /api/reconciliation/three-way/run` returns what it did. Until it runs, missing credits are not declared
+and payments whose payout landed stay SETTLED.
+
+<a id="bank-statements-not-arriving"></a>
+## PayflowBankStatementsNotArriving (ticket)
+
+**Meaning.** No bank statement has been imported for 36 hours. Banks deliver end-of-day statements daily.
+
+**Why it matters.** Without statements no payout can land, no credit can be declared missing (that needs every
+statement through the end of a payout's window), and suspense items cannot be explained.
+
+**Do.**
+1. `POST /api/bank/statements/pull` fetches and imports what the bank has; the response shows each statement's
+   outcome and how far coverage reaches (`coveredThrough`).
+2. If the bank feed is down, import files by hand: `POST /api/bank/statements` with the camt.053 file
+   (`Content-Type: application/xml`). Importing the same file twice is harmless.
+3. If statements arrive but coverage does not move, a statement in the sequence is missing: ask the bank for it.
+
 <a id="payments-stuck"></a>
 ## PayflowPaymentsStuck (ticket)
 

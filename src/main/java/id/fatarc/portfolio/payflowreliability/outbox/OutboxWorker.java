@@ -16,6 +16,10 @@ import id.fatarc.portfolio.payflowreliability.refund.RefundService;
 import id.fatarc.portfolio.payflowreliability.refund.RefundStatus;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
 import id.fatarc.portfolio.payflowreliability.review.ReviewService;
+import id.fatarc.portfolio.payflowreliability.settlement.PayoutService;
+import id.fatarc.portfolio.payflowreliability.settlement.PayoutStatus;
+import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatch;
+import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatchRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +54,7 @@ import java.util.concurrent.ThreadLocalRandom;
  *       request it had never seen before. Everything else is an unknown outcome, retried with exponential
  *       backoff and jitter; when retries run out the command needs review (retrying is always safe).</li>
  *   <li>Records the result in one transaction with the domain change and the ledger journal, locking the
- *       payment first (the global lock order). If recording fails, that counts as an attempt too, so a
+ *       payment first (the global lock order; a payout locks its settlement batch instead). If recording fails, that counts as an attempt too, so a
  *       result that cannot be recorded escalates instead of looping.</li>
  *   <li>Never resends under a key the provider may have forgotten: once the first dispatch is older than the
  *       provider's key retention (minus a margin), it only looks the key up, and escalates if the provider
@@ -58,7 +62,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * </ul>
  *
  * The idempotency key is the command's, derived once from the business operation when the command was
- * created ({@code refund-<refundId>}, {@code reversal-<paymentId>}), never per attempt: that is what lets a
+ * created ({@code refund-<refundId>}, {@code reversal-<paymentId>}, {@code payout-<batchId>}), never per attempt: that is what lets a
  * worker that died after the provider acted be replaced by another that sends the very same request.
  */
 @Component
@@ -71,6 +75,8 @@ public class OutboxWorker {
     private final PaymentTransactionRepository transactionRepository;
     private final RefundRequestRepository refundRepository;
     private final RefundService refundService;
+    private final SettlementBatchRepository batchRepository;
+    private final PayoutService payoutService;
     private final LedgerService ledgerService;
     private final ReviewService reviewService;
     private final AuditService auditService;
@@ -92,6 +98,8 @@ public class OutboxWorker {
                         PaymentTransactionRepository transactionRepository,
                         RefundRequestRepository refundRepository,
                         RefundService refundService,
+                        SettlementBatchRepository batchRepository,
+                        PayoutService payoutService,
                         LedgerService ledgerService,
                         ReviewService reviewService,
                         AuditService auditService,
@@ -111,6 +119,8 @@ public class OutboxWorker {
         this.transactionRepository = transactionRepository;
         this.refundRepository = refundRepository;
         this.refundService = refundService;
+        this.batchRepository = batchRepository;
+        this.payoutService = payoutService;
         this.ledgerService = ledgerService;
         this.reviewService = reviewService;
         this.auditService = auditService;
@@ -170,11 +180,14 @@ public class OutboxWorker {
      * when the call is no longer appropriate. Locks the payment first, like every other writer.
      */
     private Call prepare(UUID id) {
-        Optional<UUID> paymentIntentId = commandRepository.findPaymentIntentIdById(id);
-        if (paymentIntentId.isEmpty()) {
+        Optional<OutboxCommandRepository.Subject> subject = commandRepository.findSubjectById(id);
+        if (subject.isEmpty()) {
             return null;
         }
-        PaymentIntent intent = paymentIntentRepository.findForUpdate(paymentIntentId.get()).orElseThrow();
+        if (subject.get().getCommandType() == CommandType.PAYOUT) {
+            return preparePayout(id, subject.get().getSettlementBatchId());
+        }
+        PaymentIntent intent = paymentIntentRepository.findForUpdate(subject.get().getPaymentIntentId()).orElseThrow();
         OutboxCommand command = commandRepository.findById(id).orElse(null);
         if (command == null || command.getStatus() != CommandStatus.PENDING || !workerId.equals(command.getLeaseOwner())) {
             return null;
@@ -218,10 +231,30 @@ public class OutboxWorker {
 
         command.markDispatched(providerTransactionId.get(), now);
         boolean lookupOnly = previouslyDispatched && command.getDispatchedAt().isBefore(now.minus(keyResendWindow));
-        return new Call(id, command.getCommandType(), intent.getId(), refund == null ? null : refund.getId(),
-                command.getIdempotencyKey(), command.getProviderTransactionId(),
-                refund == null ? null : refund.getAmount(), intent.getCurrency(), previouslyDispatched,
+        return new Call(id, command.getCommandType(), intent.getId(), null, refund == null ? null : refund.getId(),
+                command.getIdempotencyKey(), command.getProviderTransactionId(), null, intent.getMerchantId(),
+                refund == null ? null : refund.getAmount(), intent.getCurrency(), List.of(), previouslyDispatched,
                 lookupOnly, command.getDispatchedAt());
+    }
+
+    /** A payout is about a settlement batch: the batch row is locked first, then the command. */
+    private Call preparePayout(UUID id, UUID batchId) {
+        SettlementBatch batch = batchRepository.findForUpdate(batchId).orElseThrow();
+        OutboxCommand command = commandRepository.findById(id).orElse(null);
+        if (command == null || command.getStatus() != CommandStatus.PENDING || !workerId.equals(command.getLeaseOwner())) {
+            return null;
+        }
+        Instant now = clock.instant();
+        if (batch.getPayoutStatus() != PayoutStatus.SENT) {
+            command.cancel(now);
+            return null;
+        }
+        boolean previouslyDispatched = command.wasDispatched();
+        command.markDispatched(null, now);
+        boolean lookupOnly = previouslyDispatched && command.getDispatchedAt().isBefore(now.minus(keyResendWindow));
+        return new Call(id, CommandType.PAYOUT, null, batch.getId(), null, command.getIdempotencyKey(), null,
+                batch.getPayoutReference(), batch.getMerchantId(), batch.getTotalAmount(), batch.getCurrency(),
+                payoutService.providerTransactionIds(batch), previouslyDispatched, lookupOnly, command.getDispatchedAt());
     }
 
     /** The transaction the payment was made with: the first one recorded. Later rows (a chargeback) are not it. */
@@ -235,9 +268,11 @@ public class OutboxWorker {
         try {
             boolean mayHaveBeenApplied = call.previouslyDispatched();
             if (call.previouslyDispatched()) {
-                Optional<ProviderResult> earlier = call.type() == CommandType.REFUND
-                        ? providerClient.findRefund(call.idempotencyKey())
-                        : providerClient.findReversal(call.idempotencyKey());
+                Optional<ProviderResult> earlier = switch (call.type()) {
+                    case REFUND -> providerClient.findRefund(call.idempotencyKey());
+                    case REVERSAL -> providerClient.findReversal(call.idempotencyKey());
+                    case PAYOUT -> providerClient.findPayout(call.idempotencyKey());
+                };
                 if (earlier.isPresent()) {
                     if (!(earlier.get() instanceof ProviderResult.Unknown) || call.lookupOnly()) {
                         return new Attempt(earlier.get(), false);
@@ -247,17 +282,20 @@ public class OutboxWorker {
                     return new Attempt(new ProviderResult.Unknown("First sent at " + call.dispatchedAt() + ", longer ago than the "
                             + "provider keeps idempotency keys; it no longer recognizes " + call.idempotencyKey()
                             + ". It may never have received the call, or it may have forgotten the key: a resend could be "
-                            + "applied twice. Check the provider's records for transaction " + call.providerTransactionId() + "."),
+                            + "applied twice. Check the provider's records for " + call.subject() + "."),
                             true);
                 }
                 // Empty: the provider never received an earlier attempt, so this send is the first it sees.
                 mayHaveBeenApplied = earlier.isPresent();
             }
-            ProviderResult result = call.type() == CommandType.REFUND
-                    ? providerClient.refund(call.idempotencyKey(), call.providerTransactionId(), call.amount(),
-                    call.currency(), call.refundId().toString())
-                    : providerClient.reverse(call.idempotencyKey(), call.providerTransactionId(),
-                    call.paymentIntentId().toString());
+            ProviderResult result = switch (call.type()) {
+                case REFUND -> providerClient.refund(call.idempotencyKey(), call.providerTransactionId(), call.amount(),
+                        call.currency(), call.refundId().toString());
+                case REVERSAL -> providerClient.reverse(call.idempotencyKey(), call.providerTransactionId(),
+                        call.paymentIntentId().toString());
+                case PAYOUT -> providerClient.payout(call.idempotencyKey(), call.reference(), call.merchantId(),
+                        call.amount(), call.currency(), call.providerTransactionIds());
+            };
             if (mayHaveBeenApplied && result instanceof ProviderResult.Rejected rejected && !rejected.operationFailed()) {
                 return new Attempt(new ProviderResult.Unknown("Provider refused the resent request (" + rejected.reason()
                         + "), but an earlier attempt may have been applied."), false);
@@ -271,7 +309,9 @@ public class OutboxWorker {
     private void record(Call call, Attempt attempt) {
         ProviderResult result = attempt.result();
         Instant now = clock.instant();
-        PaymentIntent intent = paymentIntentRepository.findForUpdate(call.paymentIntentId()).orElseThrow();
+        boolean payout = call.type() == CommandType.PAYOUT;
+        SettlementBatch batch = payout ? batchRepository.findForUpdate(call.batchId()).orElseThrow() : null;
+        PaymentIntent intent = payout ? null : paymentIntentRepository.findForUpdate(call.paymentIntentId()).orElseThrow();
         OutboxCommand command = commandRepository.findById(call.commandId()).orElseThrow();
         if (command.getStatus() != CommandStatus.PENDING || !workerId.equals(command.getLeaseOwner())) {
             // Another worker took over after the lease expired; it asks the provider before resending.
@@ -280,7 +320,19 @@ public class OutboxWorker {
         }
         command.recordAttempt(now);
         String resultName = switch (result) {
+            case ProviderResult.PayoutAccepted accepted -> {
+                if (!payout) {
+                    throw new IllegalStateException("Provider answered a " + call.type() + " with a payout.");
+                }
+                command.succeed(accepted.providerPayoutId(), now);
+                payoutService.onProviderAccepted(batch, accepted, ACTOR);
+                yield "succeeded";
+            }
             case ProviderResult.Succeeded succeeded -> {
+                if (payout) {
+                    throw new IllegalStateException("Provider confirmed payout " + call.reference()
+                            + " without its fee, net amount and value date.");
+                }
                 command.succeed(succeeded.providerReference(), now);
                 if (call.type() == CommandType.REFUND) {
                     RefundRequest refund = refundRepository.findById(call.refundId()).orElseThrow();
@@ -300,7 +352,9 @@ public class OutboxWorker {
             }
             case ProviderResult.Rejected rejected -> {
                 command.fail(rejected.reason(), now);
-                if (call.type() == CommandType.REFUND) {
+                if (payout) {
+                    payoutService.onProviderRefused(batch, rejected.reason(), ACTOR);
+                } else if (call.type() == CommandType.REFUND) {
                     RefundRequest refund = refundRepository.findById(call.refundId()).orElseThrow();
                     refundService.onProviderRejected(refund, intent, rejected.reason(), ACTOR);
                 } else {
@@ -331,11 +385,16 @@ public class OutboxWorker {
     private void afterFailure(UUID id, String reason) {
         try {
             transactions.executeWithoutResult(status -> {
-                Optional<UUID> paymentIntentId = commandRepository.findPaymentIntentIdById(id);
-                if (paymentIntentId.isEmpty()) {
+                Optional<OutboxCommandRepository.Subject> subject = commandRepository.findSubjectById(id);
+                if (subject.isEmpty()) {
                     return;
                 }
-                PaymentIntent intent = paymentIntentRepository.findForUpdate(paymentIntentId.get()).orElseThrow();
+                PaymentIntent intent = null;
+                if (subject.get().getCommandType() == CommandType.PAYOUT) {
+                    batchRepository.findForUpdate(subject.get().getSettlementBatchId()).orElseThrow();
+                } else {
+                    intent = paymentIntentRepository.findForUpdate(subject.get().getPaymentIntentId()).orElseThrow();
+                }
                 OutboxCommand command = commandRepository.findById(id).orElseThrow();
                 if (command.getStatus() != CommandStatus.PENDING || !workerId.equals(command.getLeaseOwner())) {
                     return;
@@ -355,14 +414,16 @@ public class OutboxWorker {
         }
     }
 
+    /** @param intent the payment the call is about; null for payouts */
     private void escalate(OutboxCommand command, PaymentIntent intent, String reason, Instant now) {
         command.escalate(reason, now);
+        UUID paymentIntentId = intent == null ? null : intent.getId();
         reviewService.openCase(ReviewReason.PROVIDER_OUTCOME_UNKNOWN, OutboxService.AGGREGATE,
-                command.getId().toString(), intent.getId(),
+                command.getId().toString(), paymentIntentId,
                 "No definite outcome after " + command.getAttempts() + " attempt(s) for " + command.getCommandType() + " "
                         + command.getReferenceId() + ": " + reason
                         + ". Retrying is safe: the provider deduplicates by idempotency key.", ACTOR);
-        auditService.record(OutboxService.AGGREGATE, command.getId().toString(), intent.getId(),
+        auditService.record(OutboxService.AGGREGATE, command.getId().toString(), paymentIntentId,
                 "PROVIDER_CALL_ESCALATED", ACTOR, reason, "attempts=" + command.getAttempts());
     }
 
@@ -381,10 +442,17 @@ public class OutboxWorker {
     }
 
     /**
-     * @param lookupOnly the first dispatch is older than the provider's key retention: ask, never resend
+     * @param paymentIntentId the payment a refund or reversal is about; null for payouts
+     * @param batchId         the settlement batch a payout is about; null otherwise
+     * @param reference       for payouts: the reference the provider puts on the bank transfer
+     * @param lookupOnly      the first dispatch is older than the provider's key retention: ask, never resend
      */
-    private record Call(UUID commandId, CommandType type, UUID paymentIntentId, UUID refundId, String idempotencyKey,
-                        String providerTransactionId, BigDecimal amount, String currency, boolean previouslyDispatched,
-                        boolean lookupOnly, Instant dispatchedAt) {
+    private record Call(UUID commandId, CommandType type, UUID paymentIntentId, UUID batchId, UUID refundId,
+                        String idempotencyKey, String providerTransactionId, String reference, String merchantId,
+                        BigDecimal amount, String currency, List<String> providerTransactionIds,
+                        boolean previouslyDispatched, boolean lookupOnly, Instant dispatchedAt) {
+        String subject() {
+            return type == CommandType.PAYOUT ? "payout " + reference : "transaction " + providerTransactionId;
+        }
     }
 }

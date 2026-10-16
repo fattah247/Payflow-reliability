@@ -72,6 +72,8 @@ payflow:
     signature-tolerance: 5m
     connect-timeout: 2s
     read-timeout: 5s
+    # Never resend a call first dispatched longer ago than this: the provider may have forgotten its key.
+    key-resend-window: 23h
   provider-sim:
     enabled: ${PAYFLOW_PROVIDER_SIM_ENABLED:true}
     api-key: ${PAYFLOW_PROVIDER_API_KEY:sim_local_provider_key}
@@ -82,10 +84,26 @@ payflow:
     delivery-max-backoff: 5m
     fault-delay: 8s
     dispatch-interval: 1s
+    # How long the simulated provider remembers idempotency keys (real providers prune them, often after 24 h).
+    key-retention: 24h
+    # The provider's fee on each payout, deducted before it sends the net (basis points of the gross).
+    payout-fee-bps: 30
+    payout-value-days: 1
   # The local stand-in for the bank holding the settlement account (statements in camt.053). Local only.
   bank-sim:
     enabled: ${PAYFLOW_BANK_SIM_ENABLED:true}
     api-key: ${PAYFLOW_BANK_API_KEY:bank_local_statement_key}
+  bank:
+    # Empty base URL means the bank simulator served by this application.
+    base-url: ${PAYFLOW_BANK_BASE_URL:}
+    api-key: ${PAYFLOW_BANK_API_KEY:bank_local_statement_key}
+    statement-poll-interval: 1m
+    # The first statement number expected per account; coverage (which days are complete) counts from here.
+    first-statement-sequence: 1
+  reconciliation:
+    # A credit lands its payout only if valued no later than the provider's expected date plus this many days.
+    value-date-window-days: 2
+    three-way-interval: 5m
   workers:
     enabled: ${PAYFLOW_WORKERS_ENABLED:true}
   outbox:

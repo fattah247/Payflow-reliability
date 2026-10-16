@@ -250,7 +250,8 @@ class ProviderWebhookTest extends IntegrationTest {
         assertThat(result.reviewReason()).isEqualTo(ReviewReason.INVALID_STATE_TRANSITION);
         assertThat(reload(intent).getState()).isEqualTo(PaymentState.MANUAL_REVIEW);
         assertThat(reload(intent).getStateBeforeReview()).isEqualTo(PaymentState.SETTLED);
-        assertThat(outboxCommandRepository.count()).as("money already paid out needs an operator decision").isZero();
+        assertThat(outboxCommandRepository.findByPaymentIntentIdOrderByCreatedAtAsc(intent.getId()))
+                .as("money already paid out needs an operator decision").isEmpty();
     }
 
     @Test

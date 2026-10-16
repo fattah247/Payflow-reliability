@@ -24,10 +24,13 @@ public class OutboxCommand {
     @Column(nullable = false)
     private CommandType commandType;
 
-    @Column(nullable = false)
+    /** The payment the call is about; null for payouts, which are about a settlement batch. */
     private UUID paymentIntentId;
 
-    /** The refund id for refunds, the payment id for reversals. */
+    /** The settlement batch a payout is about; null for refunds and reversals. */
+    private UUID settlementBatchId;
+
+    /** The refund id for refunds, the payment id for reversals, the batch id for payouts. */
     @Column(nullable = false)
     private String referenceId;
 
@@ -68,11 +71,12 @@ public class OutboxCommand {
     protected OutboxCommand() {
     }
 
-    private OutboxCommand(CommandType commandType, UUID paymentIntentId, String referenceId, String idempotencyKey,
-                          Instant now) {
+    private OutboxCommand(CommandType commandType, UUID paymentIntentId, UUID settlementBatchId, String referenceId,
+                          String idempotencyKey, Instant now) {
         this.id = UUID.randomUUID();
         this.commandType = commandType;
         this.paymentIntentId = paymentIntentId;
+        this.settlementBatchId = settlementBatchId;
         this.referenceId = referenceId;
         this.idempotencyKey = idempotencyKey;
         this.status = CommandStatus.PENDING;
@@ -83,7 +87,7 @@ public class OutboxCommand {
     }
 
     public static OutboxCommand refund(UUID paymentIntentId, UUID refundId, Instant now) {
-        return new OutboxCommand(CommandType.REFUND, paymentIntentId, refundId.toString(), refundKey(refundId), now);
+        return new OutboxCommand(CommandType.REFUND, paymentIntentId, null, refundId.toString(), refundKey(refundId), now);
     }
 
     public static OutboxCommand reversal(UUID paymentIntentId, Instant now) {
@@ -93,7 +97,17 @@ public class OutboxCommand {
     /** The n-th reversal of a payment; only the first uses the plain key, later ones follow a refusal. */
     static OutboxCommand reversal(UUID paymentIntentId, int number, Instant now) {
         String key = number <= 1 ? reversalKey(paymentIntentId) : reversalKey(paymentIntentId) + "-" + number;
-        return new OutboxCommand(CommandType.REVERSAL, paymentIntentId, paymentIntentId.toString(), key, now);
+        return new OutboxCommand(CommandType.REVERSAL, paymentIntentId, null, paymentIntentId.toString(), key, now);
+    }
+
+    /** Pays a settlement batch out; the key is the batch's, so every resend asks for the same payout. */
+    public static OutboxCommand payout(UUID settlementBatchId, Instant now) {
+        return new OutboxCommand(CommandType.PAYOUT, null, settlementBatchId, settlementBatchId.toString(),
+                payoutKey(settlementBatchId), now);
+    }
+
+    public static String payoutKey(UUID settlementBatchId) {
+        return "payout-" + settlementBatchId;
     }
 
     public static String refundKey(UUID refundId) {
@@ -183,6 +197,7 @@ public class OutboxCommand {
     public Long getVersion() { return version; }
     public CommandType getCommandType() { return commandType; }
     public UUID getPaymentIntentId() { return paymentIntentId; }
+    public UUID getSettlementBatchId() { return settlementBatchId; }
     public String getReferenceId() { return referenceId; }
     public String getIdempotencyKey() { return idempotencyKey; }
     public CommandStatus getStatus() { return status; }

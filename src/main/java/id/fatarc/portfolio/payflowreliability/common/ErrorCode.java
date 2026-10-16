@@ -44,6 +44,12 @@ public enum ErrorCode {
     SETTLEMENT_CURRENCY_REQUIRED(HttpStatus.UNPROCESSABLE_ENTITY, false),
     RESOLUTION_ACTION_NOT_APPLICABLE(HttpStatus.UNPROCESSABLE_ENTITY, false),
     MERCHANT_INACTIVE(HttpStatus.UNPROCESSABLE_ENTITY, false),
+    /** A bank statement file that is not well-formed, not camt.053, or does not add up. */
+    BANK_STATEMENT_INVALID(HttpStatus.UNPROCESSABLE_ENTITY, false),
+    /** A statement id or sequence number already imported, with different content. */
+    BANK_STATEMENT_CONFLICT(HttpStatus.CONFLICT, false),
+    BREAK_NOT_FOUND(HttpStatus.NOT_FOUND, false),
+    BREAK_ACTION_NOT_APPLICABLE(HttpStatus.UNPROCESSABLE_ENTITY, false),
 
     PROVIDER_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, true),
 

@@ -8,8 +8,8 @@ import java.util.Map;
 /** Failure injection for the next calls of an operation. In memory: it is a test and demo control. */
 @Component
 public class SimFaults {
-    /** LOOKUP is the provider's "what happened to this idempotency key" endpoint for refunds and reversals. */
-    public enum Operation { REFUND, REVERSAL, STATUS, LOOKUP }
+    /** LOOKUP is the provider's "what happened to this idempotency key" endpoint for refunds, reversals and payouts. */
+    public enum Operation { REFUND, REVERSAL, PAYOUT, STATUS, LOOKUP }
 
     public enum Mode {
         NONE,
