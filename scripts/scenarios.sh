@@ -642,7 +642,7 @@ scenario_outbound_key_crash() {
 
 scenario_bank_reconciliation() {
   header "Three-way reconciliation: ledger, provider, bank" \
-    "A payout lands only on a bank credit matched by reference, amount and value date; only then is a payment reconciled."
+    "A payout lands only on a bank credit matching reference, amount and value date; only then is a payment reconciled."
 
   local a b c
   a=$(paid "ORDER-A-$RUN_ID" 100000)
@@ -709,7 +709,7 @@ for check in batch["checks"]:
 
 scenario_fee_deduction() {
   header "Fees on both sides of the transfer" \
-    "The provider keeps its fee and the bank takes a charge: each is its own ledger line, and gross - fees = cash, to the cent."
+    "Provider fee and bank charge are each their own ledger line, and gross - fees = cash received, to the cent."
 
   paid "ORDER-$RUN_ID" 500000 > /dev/null
   quiet_outbox
@@ -757,7 +757,7 @@ for journal in json.load(sys.stdin):
 
 scenario_missing_credit() {
   header "The provider says it paid; the bank never credits" \
-    "A payout is declared missing only once every statement through its value-date window has arrived; then it gets an owner and a deadline."
+    "Missing only once every statement through the value-date window is in; then a break with an owner and a deadline."
 
   local payment
   payment=$(paid "ORDER-$RUN_ID" 300000)
@@ -1012,7 +1012,7 @@ scenario_slow_but_up() {
 
 scenario_device_risk() {
   header "Device risk as money" \
-    "Step-ups hold the payment until the customer confirms, blocks never reach the provider, and every threshold has a price."
+    "Step-ups wait for the customer, blocks never reach the provider, and every threshold has a price in money."
 
   local rooted='{"deviceKeyId": "device-7", "level": "LOW", "simulated": true, "stepUpKeyAvailable": true,
     "signals": [{"id": "root_package", "category": "ROOT", "severity": "HIGH", "source": "DEVICE_CHECK"}]}'
@@ -1111,7 +1111,7 @@ print(all(b["fraudLoss"] >= a["fraudLoss"] and b["legitimateLostToFriction"] <= 
 
 scenario_chaos() {
   header "Chaos: a seeded sequence of faults against the running app" \
-    "Lost, duplicated and late webhooks, provider timeouts, racing settlements, every bank fault, slowness, device risk: every money rule still holds."
+    "Lost and doubled webhooks, provider timeouts, racing payouts, bank faults, slowness, device risk: the money rules hold."
 
   quiet_outbox
   as_ops request POST /api/simulations/chaos-runs "{\"seed\": 42, \"steps\": 150, \"merchantApiKey\": \"$MERCHANT_KEY\"}"
