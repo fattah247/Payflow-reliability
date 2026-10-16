@@ -24,6 +24,7 @@ import id.fatarc.portfolio.payflowreliability.payment.dto.ProviderWebhookRequest
 import id.fatarc.portfolio.payflowreliability.providersim.ProviderSimulator;
 import id.fatarc.portfolio.payflowreliability.providersim.SimApiRequestRepository;
 import id.fatarc.portfolio.payflowreliability.providersim.SimFaults;
+import id.fatarc.portfolio.payflowreliability.providersim.SimLatency;
 import id.fatarc.portfolio.payflowreliability.providersim.SimOperationRepository;
 import id.fatarc.portfolio.payflowreliability.providersim.SimWebhookDispatcher;
 import id.fatarc.portfolio.payflowreliability.reconciliation.ReconciliationService;
@@ -135,6 +136,7 @@ public abstract class IntegrationTest {
     @Autowired protected CrashableProviderClient providerClient;
     @Autowired protected BankSimulator bankSimulator;
     @Autowired protected BankFaults bankFaults;
+    @Autowired protected SimLatency simLatency;
     @Autowired protected BankStatementImportService bankStatementImportService;
     @Autowired protected ThreeWayReconciliationService threeWayReconciliationService;
     @Autowired protected ReconciliationBreakRepository breakRepository;
@@ -147,6 +149,7 @@ public abstract class IntegrationTest {
     protected void resetWorld() {
         clock.reset();
         simFaults.clear();
+        simLatency.recover();
         bankFaults.clear();
         providerClient.reset();
         truncateAll();

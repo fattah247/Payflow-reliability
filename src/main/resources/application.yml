@@ -89,6 +89,8 @@ payflow:
     # The provider's fee on each payout, deducted before it sends the net (basis points of the gross).
     payout-fee-bps: 30
     payout-value-days: 1
+    # While slow, the simulator waits this share of each declared latency (declared values still drive decisions).
+    latency-time-scale: 0.05
   # The local stand-in for the bank holding the settlement account (statements in camt.053). Local only.
   bank-sim:
     enabled: ${PAYFLOW_BANK_SIM_ENABLED:true}
@@ -105,6 +107,22 @@ payflow:
     confirmation-slo: 10s
     slo-objective: 0.95
     abandonment-window: 15m
+  # Simulated customers for local demos (ADR 027). Every value is a model assumption, not observed behaviour.
+  loadgen:
+    checkout:
+      enabled: ${PAYFLOW_LOADGEN_ENABLED:true}
+      customers: 40
+      amount-min: 50000
+      amount-max: 500000
+      patience-min: 2s
+      patience-max: 8s
+      abandon-probability: 0.5
+      max-attempts: 3
+      concurrency: 8
+      # While slow: customers with less patience than the page leave or reload; those who wait for the page but not
+      # for the payment answer press pay again (the retry an idempotency key must absorb).
+      slow-checkout-page: 4s
+      slow-pay: 7s
   reconciliation:
     # A credit lands its payout only if valued no later than the provider's expected date plus this many days.
     value-date-window-days: 2

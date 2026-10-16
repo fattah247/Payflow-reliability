@@ -27,9 +27,11 @@ public class SimController {
     private final SimFaults faults;
     private final SimulatorProperties properties;
     private final SimRequestLog requestLog;
+    private final SimLatency latency;
 
     public SimController(ProviderSimulator simulator, SimWebhookDispatcher dispatcher, SimFaults faults,
-                         SimulatorProperties properties, SimRequestLog requestLog) {
+                         SimulatorProperties properties, SimRequestLog requestLog, SimLatency latency) {
+        this.latency = latency;
         this.simulator = simulator;
         this.dispatcher = dispatcher;
         this.faults = faults;
@@ -57,12 +59,57 @@ public class SimController {
     public record FaultRequest(SimFaults.Operation operation, SimFaults.Mode mode, Integer times) {
     }
 
+    /**
+     * @param checkoutPageMillis how long the hosted payment page takes to load
+     * @param payMillis          how long the provider takes to answer a payment (it has already charged)
+     * @param holdWebhooks       keep webhooks in the provider's backlog until it recovers
+     */
+    public record SlowRequest(Long checkoutPageMillis, Long payMillis, Boolean holdWebhooks) {
+    }
+
     // ---- simulation controls: the customer and the outside world -------------------------------
 
+    /** The customer opens the provider's hosted payment page. Slow when the provider is slow; nothing is charged. */
+    @PostMapping("/checkout/{paymentIntentId}")
+    public ResponseEntity<Map<String, Object>> checkoutPage(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                                            @PathVariable UUID paymentIntentId) throws InterruptedException {
+        authenticate(authorization);
+        long declared = latency.checkoutPage();
+        return ResponseEntity.ok().header("X-Provider-Latency-Ms", String.valueOf(declared))
+                .body(Map.of("paymentIntentId", paymentIntentId, "latencyMillis", declared));
+    }
+
+    @PutMapping("/latency")
+    public Map<String, Object> slowDown(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                        @RequestBody SlowRequest request) {
+        authenticate(authorization);
+        latency.slow(new SimLatency.Mode(request.checkoutPageMillis() == null ? 0 : request.checkoutPageMillis(),
+                request.payMillis() == null ? 0 : request.payMillis(), Boolean.TRUE.equals(request.holdWebhooks())));
+        return latencyView();
+    }
+
+    /** Back to normal; webhooks held in the backlog are sent on the next dispatch. */
+    @DeleteMapping("/latency")
+    public Map<String, Object> recover(@RequestHeader(value = "Authorization", required = false) String authorization) {
+        authenticate(authorization);
+        latency.recover();
+        return latencyView();
+    }
+
+    private Map<String, Object> latencyView() {
+        SimLatency.Mode mode = latency.mode();
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("slow", mode.slow());
+        view.put("checkoutPageMillis", mode.checkoutPageMillis());
+        view.put("payMillis", mode.payMillis());
+        view.put("holdWebhooks", mode.holdWebhooks());
+        return view;
+    }
+
     @PostMapping("/payments/{paymentIntentId}/{action}")
-    public Map<String, Object> customer(@RequestHeader(value = "Authorization", required = false) String authorization,
-                                        @PathVariable UUID paymentIntentId, @PathVariable String action,
-                                        @RequestBody(required = false) CustomerAction body) {
+    public ResponseEntity<Map<String, Object>> customer(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                                        @PathVariable UUID paymentIntentId, @PathVariable String action,
+                                                        @RequestBody(required = false) CustomerAction body) throws InterruptedException {
         authenticate(authorization);
         CustomerAction request = body == null ? new CustomerAction(null, null, null, null, null, null) : body;
         SimPayment payment = switch (action) {
@@ -74,7 +121,9 @@ public class SimController {
             case "chargeback" -> simulator.chargeback(paymentIntentId, request.options());
             default -> throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown action " + action);
         };
-        return view(payment);
+        // The provider has already charged; a slow provider is only slow to say so.
+        long declared = "pay".equals(action) ? latency.pay() : 0;
+        return ResponseEntity.ok().header("X-Provider-Latency-Ms", String.valueOf(declared)).body(view(payment));
     }
 
     @GetMapping("/payments/{paymentIntentId}/webhooks")

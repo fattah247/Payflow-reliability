@@ -34,25 +34,30 @@ public class SimWebhookDispatcher {
 
     private final SimWebhookDeliveryRepository deliveries;
     private final SimulatorProperties properties;
+    private final SimLatency latency;
     private final LocalServer localServer;
     private final RestClient.Builder builder;
     private final Clock clock;
     private final TransactionTemplate transactions;
     private volatile RestClient client;
 
-    public SimWebhookDispatcher(SimWebhookDeliveryRepository deliveries, SimulatorProperties properties,
+    public SimWebhookDispatcher(SimWebhookDeliveryRepository deliveries, SimulatorProperties properties, SimLatency latency,
                                 LocalServer localServer, RestClient.Builder builder, Clock clock,
                                 PlatformTransactionManager transactionManager) {
         this.deliveries = deliveries;
         this.properties = properties;
+        this.latency = latency;
         this.localServer = localServer;
         this.builder = builder;
         this.clock = clock;
         this.transactions = new TransactionTemplate(transactionManager);
     }
 
-    /** Sends due webhooks once; returns how many delivery attempts were made. */
+    /** Sends due webhooks once; returns how many delivery attempts were made. A slow provider holds them in its backlog. */
     public synchronized int runOnce() {
+        if (latency.holdingWebhooks()) {
+            return 0;
+        }
         List<UUID> due = transactions.execute(status -> deliveries.findDue(clock.instant(), PageRequest.of(0, 50)));
         int attempts = 0;
         for (UUID id : due) {

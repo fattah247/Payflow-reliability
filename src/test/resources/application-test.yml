@@ -31,6 +31,10 @@ payflow:
     delivery-base-backoff: 1ms
     delivery-max-backoff: 2ms
     fault-delay: 1500ms
+    latency-time-scale: 0.0
+  loadgen:
+    checkout:
+      enabled: true
   bank-sim:
     enabled: true
     api-key: bank_test_statement_key
