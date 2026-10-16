@@ -331,6 +331,86 @@ reported is flagged `MISSING_FROM_REPORT` and opens a case.
 
 Proof: `ReconciliationTest.shouldFlagPayoutsTheProviderDidNotReport`, `shouldAcceptAnEmptyReportForADayWithNoProviderActivity`
 
+## The bank leg (settlement certainty)
+
+Every case below ends in exactly one place: the payout LANDED, or the money is in `bank_suspense` with an open
+break that says why, who owns it and when it is due. After each test the ledger check proves that bank credits
+equal payouts minus fees plus what open breaks hold, to the cent. Fees in the examples: the provider deducts
+30 bps (9.00 on a 3000.00 payout, net 2991.00).
+
+### The provider says it paid
+
+Expected: the payout is IN_TRANSIT (money in `payouts_in_transit`), never LANDED, until a bank credit matches it
+by reference, amount and value date.
+
+Proof: `PayoutLifecycleTest.shouldGoFromSentToInTransitToLandedWithTheFeeOnItsOwnLine`, `shouldNotTreatTheProvidersWordAsArrival`
+
+### The provider refuses the payout; the worker dies after the provider paid
+
+Expected: BROKEN(PROVIDER_REFUSED) with a break for provider operations, money still with the provider; after a
+crash the next worker finds the payout by its key (`payout-<batchId>`), one payout, one credit.
+
+Proof: `PayoutLifecycleTest.shouldBreakAPayoutTheProviderRefusesAndLeaveTheMoneyWithTheProvider`,
+`shouldResendAPayoutUnderItsKeyAfterAWorkerDiesOnceTheProviderPaid`
+
+### Missing credit
+
+Expected: declared only once every statement through the end of the value-date window has arrived; BROKEN
+(MISSING_CREDIT), a treasury break due in 24 hours, overdue after that. A credit that turns up later still lands it.
+
+Proof: `ThreeWayReconciliationTest.shouldDeclareACreditMissingOnlyWhenEveryStatementThroughTheWindowHasArrived`
+
+### Late credit
+
+Expected: inside the window it simply lands; outside it is held in suspense (LATE_CREDIT) until a person assigns
+it, which lands the payout and closes the missing-credit break too.
+
+Proof: `shouldLandACreditThatIsLateButInsideTheWindow`, `shouldHoldACreditOutsideTheWindowUntilSomeoneAcceptsIt`
+
+### Duplicate credit
+
+Expected: the first lands, the second is held in suspense (DUPLICATE_CREDIT) and cannot be acknowledged away;
+when the bank takes it back, suspense returns to zero and the payout stays landed.
+
+Proof: `shouldHoldADuplicateCreditInSuspenseUntilTheBankTakesItBack`
+
+### Credit net of a bank charge
+
+Expected: the charge itemized in the statement is booked as its own line: received 2984.50 + provider fee 9.00
++ bank charges 6.50 = gross 3000.00. A shortfall the bank does not itemize is an AMOUNT_MISMATCH.
+
+Proof: `shouldBookBankChargesAsTheirOwnLineSoGrossMinusFeesIsExactlyNet`, `shouldHoldACreditWhoseAmountDoesNotAddUp`
+
+### Wrong or missing reference
+
+Expected: never matched by amount, even when a payout of exactly that amount is waiting; held in suspense
+(UNMATCHED_CREDIT) until assigned. An assignment overrides the reference, never the amount.
+
+Proof: `shouldNeverMatchByAmountAlone`, `shouldRefuseToAssignACreditWhoseAmountDoesNotMatch`
+
+### Returned payout
+
+Expected: the return debit puts the money back on the provider (`provider_receivable`), the payout is
+BROKEN(RETURNED), treasury gets a break.
+
+Proof: `shouldPutAReturnedPayoutBackOnTheProvider`
+
+### A statement imported twice, re-sent, repeated, or out of order
+
+Expected: the same file twice books nothing twice; the same id with other content is a conflict (409, a break);
+a statement repeating yesterday's entry is not booked twice and treasury is told; statements arriving in any
+order book the same, and a gap is never mistaken for a missing credit.
+
+Proof: `shouldImportTheSameStatementTwiceWithoutBookingAnythingTwice`, `shouldIgnoreAStatementTheBankDeliversTwice`,
+`shouldBookStatementsTheSameWhateverOrderTheyArriveIn`, `shouldMatchACreditThatArrivedBeforeTheProviderConfirmed`
+
+### Provider report vs ledger; no reconciliation without the bank
+
+Expected: the provider's payout rows must agree with the ledger and with its own answer (fee, net, payout id);
+payouts it omits or invents are breaks. A clean payment row is MATCHED_AWAITING_BANK until the payout lands.
+
+Proof: `ProviderPayoutReportTest`, `ReconciliationTest.shouldReconcileOnlyOnceTheReportMatchesAndThePayoutHasLanded`
+
 ## Operations and evidence
 
 ### Books that disagree with operations

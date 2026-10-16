@@ -1,5 +1,7 @@
 # 017 Net Settlement
 
+Status: extended by [025](025-bank-statement-three-way-reconciliation.md): a batch is a payout with a lifecycle (SENT, IN_TRANSIT, LANDED or BROKEN) that only a matched bank credit completes.
+
 Amends [005](005-settlement-reconciliation.md).
 
 ## Context
