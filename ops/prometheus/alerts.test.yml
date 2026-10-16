@@ -1,0 +1,111 @@
+# Unit tests for alerts.yml, run with: promtool test rules ops/prometheus/alerts.test.yml
+# Each test feeds synthetic series and states which alerts must (and must not) be firing at a given time.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # The provider is slow: confirmations pile up past the SLO and customers abandon, while every probe says UP.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_health_up{instance="app"}'
+        values: '1x30'
+      - series: 'payflow_money_at_risk_count{instance="app",kind="pending_beyond_sla"}'
+        values: '0 0 0 0 0 4x25'
+      - series: 'payflow_checkout_abandoned_total{instance="app",currency="IDR"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PayflowSlowButUp
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PayflowSlowButUp
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Healthy by every probe, but money is at risk: payments stuck past the confirmation SLO or customers abandoning checkout"
+              runbook: docs/runbook.md#slow-but-up
+
+  # Customers abandon while nothing is stuck yet: abandonment alone is money lost.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_health_up{instance="app"}'
+        values: '1x30'
+      - series: 'payflow_money_at_risk_count{instance="app",kind="pending_beyond_sla"}'
+        values: '0x30'
+      - series: 'payflow_checkout_abandoned_total{instance="app",currency="IDR"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PayflowSlowButUp
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Healthy by every probe, but money is at risk: payments stuck past the confirmation SLO or customers abandoning checkout"
+              runbook: docs/runbook.md#slow-but-up
+
+  # Down is not "slow but up": other alerts own an outage, this one stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_health_up{instance="app"}'
+        values: '0x30'
+      - series: 'payflow_money_at_risk_count{instance="app",kind="pending_beyond_sla"}'
+        values: '9x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PayflowSlowButUp
+        exp_alerts: []
+
+  # Half of all confirmations miss a 95 % objective: a burn rate of 10, above the six-hour threshold of 6, pages.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_checkout_slo_objective{instance="app"}'
+        values: '0.95x420'
+      - series: 'payflow_payment_confirmations_total{instance="app",within_slo="true"}'
+        values: '0+10x420'
+      - series: 'payflow_payment_confirmations_total{instance="app",within_slo="false"}'
+        values: '0+10x420'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PayflowCheckoutSloBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Checkout confirmations are burning the latency error budget too fast"
+              runbook: docs/runbook.md#checkout-slo-burn
+
+  # Everything fast: no burn.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_checkout_slo_objective{instance="app"}'
+        values: '0.95x120'
+      - series: 'payflow_payment_confirmations_total{instance="app",within_slo="true"}'
+        values: '0+10x120'
+      - series: 'payflow_payment_confirmations_total{instance="app",within_slo="false"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PayflowCheckoutSloBurn
+        exp_alerts: []
+
+  # A single duplicate charge pages at once.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_money_at_risk_count{instance="app",kind="duplicate_charges"}'
+        values: '0 0 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PayflowDuplicateCharge
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: PayflowDuplicateCharge
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "1 checkout(s) charged more than once: a client is not reusing its idempotency key"
+              runbook: docs/runbook.md#duplicate-charge

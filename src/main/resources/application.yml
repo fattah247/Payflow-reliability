@@ -100,6 +100,11 @@ payflow:
     statement-poll-interval: 1m
     # The first statement number expected per account; coverage (which days are complete) counts from here.
     first-statement-sequence: 1
+  checkout:
+    # The checkout service level, measured inside the payment system: start to confirmed capture.
+    confirmation-slo: 10s
+    slo-objective: 0.95
+    abandonment-window: 15m
   reconciliation:
     # A credit lands its payout only if valued no later than the provider's expected date plus this many days.
     value-date-window-days: 2

@@ -164,7 +164,7 @@ class LegacyDataMigrationTest {
 
         var result = flyway("latest").migrate();
         assertThat(result.success).isTrue();
-        assertThat(result.targetSchemaVersion).isEqualTo(postgres ? "8" : "7");
+        assertThat(result.targetSchemaVersion).isEqualTo("9");
 
         assertThat(jdbc.queryForObject("select state from payment_intents where id = ?", String.class, refundRequested))
                 .as("REFUND_REQUESTED is no longer a payment state; the refund itself stays in flight").isEqualTo("SUCCESS");
@@ -191,6 +191,8 @@ class LegacyDataMigrationTest {
         assertThat(jdbc.queryForObject("select capture_amount from settlement_batches", BigDecimal.class)).isEqualByComparingTo("100");
         assertThat(jdbc.queryForObject("select payout_status from settlement_batches", String.class))
                 .as("paid out before bank statements were reconciled: no bank evidence to wait for").isEqualTo("LEGACY");
+        assertThat(jdbc.queryForObject("select started_at from payment_intents where id = ?", OffsetDateTime.class, settled))
+                .as("when it became PENDING, from the audit trail").isEqualTo(T0.plusMinutes(1));
         assertThat(jdbc.queryForObject("select status from merchants where merchant_id = ?", String.class, MERCHANT)).isEqualTo("ACTIVE");
 
         assertThat(jdbc.queryForList("select status from review_cases where reference_id = ? order by created_at",

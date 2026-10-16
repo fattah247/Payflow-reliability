@@ -15,6 +15,11 @@ import id.fatarc.portfolio.payflowreliability.review.ReviewCaseRepository;
 import id.fatarc.portfolio.payflowreliability.review.ReviewStatus;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.MultiGauge;
+import io.micrometer.core.instrument.Tags;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.actuate.health.HealthEndpoint;
+import org.springframework.boot.actuate.health.Status;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,8 +30,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -45,6 +54,9 @@ public class OperationalMetrics {
     private final SettlementBatchRepository batchRepository;
     private final ThreeWayReconciliationService threeWayService;
     private final BankStatementImportService statementImportService;
+    private final MoneyAtRiskService moneyAtRiskService;
+    private final ObjectProvider<HealthEndpoint> healthEndpoint;
+    private final MultiGauge moneyAtRiskAmount;
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final Duration stuckAfter;
@@ -60,6 +72,8 @@ public class OperationalMetrics {
                               SettlementBatchRepository batchRepository,
                               ThreeWayReconciliationService threeWayService,
                               BankStatementImportService statementImportService,
+                              MoneyAtRiskService moneyAtRiskService,
+                              ObjectProvider<HealthEndpoint> healthEndpoint,
                               PlatformTransactionManager transactionManager,
                               Clock clock,
                               @Value("${payflow.sweeper.stuck-after:15m}") Duration stuckAfter) {
@@ -71,6 +85,8 @@ public class OperationalMetrics {
         this.batchRepository = batchRepository;
         this.threeWayService = threeWayService;
         this.statementImportService = statementImportService;
+        this.moneyAtRiskService = moneyAtRiskService;
+        this.healthEndpoint = healthEndpoint;
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setReadOnly(true);
         this.clock = clock;
@@ -110,6 +126,15 @@ public class OperationalMetrics {
                 s -> s.reconciliationCheckAgeSeconds);
         gauge(registry, "payflow.bank.statement.import.age", "Time since a bank statement was last imported", "seconds",
                 s -> s.statementImportAgeSeconds);
+        // Money at risk: what slowness, fraud controls and breaks are costing now, whatever the health checks say.
+        for (MoneyAtRiskService.Kind kind : MoneyAtRiskService.Kind.values()) {
+            Gauge.builder("payflow.money.at.risk.count", snapshot, ref -> ref.get().atRiskCount.getOrDefault(kind, 0L))
+                    .description("Payments or items at risk, by kind").tag("kind", kind.name().toLowerCase(Locale.ROOT))
+                    .register(registry);
+        }
+        this.moneyAtRiskAmount = MultiGauge.builder("payflow.money.at.risk.amount")
+                .description("Money at risk, by kind and currency").register(registry);
+        gauge(registry, "payflow.health.up", "1 when the application's health checks report UP", null, s -> s.healthUp);
     }
 
     public void refresh() {
@@ -129,6 +154,17 @@ public class OperationalMetrics {
                 Instant lastThreeWay = threeWayService.lastRun().map(ThreeWayReconciliationService.RunReport::checkedAt)
                         .orElse(startedAt);
                 Instant lastStatement = statementImportService.lastImport().orElse(startedAt);
+                MoneyAtRiskService.MoneyAtRisk atRisk = moneyAtRiskService.compute();
+                Map<MoneyAtRiskService.Kind, Long> atRiskCount = new EnumMap<>(MoneyAtRiskService.Kind.class);
+                List<MultiGauge.Row<?>> amountRows = new ArrayList<>();
+                for (MoneyAtRiskService.Item item : atRisk.items()) {
+                    atRiskCount.put(item.kind(), item.count());
+                    item.amount().forEach((currency, amount) -> amountRows.add(MultiGauge.Row.of(
+                            Tags.of("kind", item.kind().name().toLowerCase(Locale.ROOT), "currency", currency), amount.doubleValue())));
+                }
+                moneyAtRiskAmount.register(amountRows, true);
+                boolean up = healthEndpoint.getIfAvailable() != null
+                        && Status.UP.equals(healthEndpoint.getObject().health().getStatus());
                 return new Snapshot(now, unresolved,
                         reviewCaseRepository.countByStatus(ReviewStatus.AWAITING_APPROVAL),
                         oldestCase,
@@ -144,7 +180,9 @@ public class OperationalMetrics {
                         oldestBreak,
                         batchRepository.findByPayoutStatusInOrderByCreatedAtAsc(EnumSet.of(PayoutStatus.BROKEN)).size(),
                         Duration.between(lastThreeWay, now).toSeconds(),
-                        Duration.between(lastStatement, now).toSeconds());
+                        Duration.between(lastStatement, now).toSeconds(),
+                        atRiskCount,
+                        up ? 1 : 0);
             });
             snapshot.set(fresh);
         } catch (RuntimeException ex) {
@@ -167,9 +205,10 @@ public class OperationalMetrics {
                             double oldestPendingAgeSeconds, double stuckPayments, double ledgerViolations,
                             double ledgerCheckAgeSeconds, double openBreaks, double overdueBreaks,
                             double oldestBreakAgeSeconds, double brokenPayouts, double reconciliationCheckAgeSeconds,
-                            double statementImportAgeSeconds) {
+                            double statementImportAgeSeconds, Map<MoneyAtRiskService.Kind, Long> atRiskCount,
+                            double healthUp) {
         static Snapshot empty(Instant now) {
-            return new Snapshot(now, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            return new Snapshot(now, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(), 0);
         }
     }
 }

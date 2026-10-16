@@ -81,6 +81,52 @@ groups:
           summary: "No bank statement imported for 36 hours: payouts cannot be confirmed or declared missing"
           runbook: docs/runbook.md#bank-statements-not-arriving
 
+  - name: payflow-checkout
+    rules:
+      # Every probe says UP, and money is still being lost: confirmations stuck past the SLO, or customers leaving.
+      - alert: PayflowSlowButUp
+        expr: |
+          max(payflow_health_up) == 1
+          and on() (
+            sum(payflow_money_at_risk_count{kind="pending_beyond_sla"}) >= 3
+            or sum(increase(payflow_checkout_abandoned_total[10m])) >= 3
+          )
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Healthy by every probe, but money is at risk: payments stuck past the confirmation SLO or customers abandoning checkout"
+          runbook: docs/runbook.md#slow-but-up
+
+      # Error-budget burn: the share of confirmations slower than the SLO, divided by the budget (1 - objective).
+      # 14.4 over one hour spends 2 % of a 30-day budget; 6 over six hours spends 5 % (the usual pair of windows).
+      - alert: PayflowCheckoutSloBurn
+        expr: |
+          (
+            sum(rate(payflow_payment_confirmations_total{within_slo="false"}[1h]))
+              / clamp_min(sum(rate(payflow_payment_confirmations_total[1h])), 1e-9)
+          ) / (1 - max(payflow_checkout_slo_objective)) > 14.4
+          or
+          (
+            sum(rate(payflow_payment_confirmations_total{within_slo="false"}[6h]))
+              / clamp_min(sum(rate(payflow_payment_confirmations_total[6h])), 1e-9)
+          ) / (1 - max(payflow_checkout_slo_objective)) > 6
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Checkout confirmations are burning the latency error budget too fast"
+          runbook: docs/runbook.md#checkout-slo-burn
+
+      - alert: PayflowDuplicateCharge
+        expr: sum(payflow_money_at_risk_count{kind="duplicate_charges"}) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} checkout(s) charged more than once: a client is not reusing its idempotency key"
+          runbook: docs/runbook.md#duplicate-charge
+
   - name: payflow-flow
     rules:
       - alert: PayflowPaymentsStuck

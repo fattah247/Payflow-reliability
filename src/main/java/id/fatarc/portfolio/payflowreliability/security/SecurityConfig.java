@@ -54,6 +54,7 @@ public class SecurityConfig implements WebMvcConfigurer {
                         .requestMatchers("/provider-sim/**", "/bank-sim/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents").hasRole(MERCHANT)
                         .requestMatchers(HttpMethod.POST, "/api/payment-intents/*/start").hasAnyRole(MERCHANT, OPERATOR)
+                        .requestMatchers(HttpMethod.POST, "/api/payment-intents/*/cancel").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.GET, "/api/payment-intents/*").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.POST, "/api/refunds/payment-intents/*").hasAnyRole(MERCHANT, OPERATOR)
                         .requestMatchers(HttpMethod.GET, "/api/refunds/**").hasAnyRole(MERCHANT, OPERATOR)

@@ -121,3 +121,7 @@ jobs:
         run: >-
           docker run --rm -v "$PWD/ops/prometheus:/rules:ro" --entrypoint promtool prom/prometheus:v2.53.2
           check rules /rules/alerts.yml
+      - name: Unit-test Prometheus rules
+        run: >-
+          docker run --rm -v "$PWD/ops/prometheus:/rules:ro" --entrypoint promtool prom/prometheus:v2.53.2
+          test rules /rules/alerts.test.yml

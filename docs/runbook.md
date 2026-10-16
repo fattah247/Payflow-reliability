@@ -139,6 +139,48 @@ statement through the end of a payout's window), and suspense items cannot be ex
    (`Content-Type: application/xml`). Importing the same file twice is harmless.
 3. If statements arrive but coverage does not move, a statement in the sequence is missing: ask the bank for it.
 
+<a id="slow-but-up"></a>
+## PayflowSlowButUp (page)
+
+**Meaning.** Every health check reports UP, yet money is at risk: at least three payments have waited for the
+provider's confirmation longer than the checkout SLO (`payflow.checkout.confirmation-slo`, 10 s), or customers
+are abandoning checkout (three or more in ten minutes).
+
+**Why it matters.** Nothing is "down", so no availability alert fires, while sales are being lost and customers
+who are not sure they paid are about to try again. This is the alert for the provider being slow, not absent.
+
+**Do.**
+1. `GET /api/operations/summary` → `moneyAtRisk`: `PENDING_BEYOND_SLA` (count and amount waiting) and
+   `ABANDONED` (count, amount and amount per minute over the window).
+2. Check the provider's status page and the latency of its webhooks. If webhooks are delayed, the status sweeper
+   (`POST /api/operations/sweeps/payment-status?olderThanSeconds=60`) asks the provider directly.
+3. Watch `PayflowDuplicateCharge`: impatient customers retry, and only clients that reuse their idempotency key
+   are protected.
+4. Tell merchants: a payment page that does not load is costing them checkouts right now.
+
+<a id="checkout-slo-burn"></a>
+## PayflowCheckoutSloBurn (page)
+
+**Meaning.** The share of checkouts confirmed later than the SLO is using up the error budget fast: more than
+14.4 times the allowed rate over an hour, or 6 times over six hours (with a 95 % objective, 5 % may be slow).
+
+**Do.** Same first steps as PayflowSlowButUp. `payflow_payment_confirmation_seconds` (histogram, with the SLO as a
+bucket boundary) shows how slow; `payflow_payment_confirmations_total{within_slo}` shows how many.
+
+<a id="duplicate-charge"></a>
+## PayflowDuplicateCharge (page)
+
+**Meaning.** A merchant reference was captured more than once: a customer was charged twice for one checkout.
+
+**Why it matters.** The server deduplicates only requests that carry the same idempotency key. A duplicate means a
+client generated a new key for a retry (see [the client contract](idempotency-keys.md)).
+
+**Do.**
+1. `GET /api/operations/summary` → `moneyAtRisk.DUPLICATE_CHARGES` gives the count and the extra amount.
+2. Find the payments: same `merchantReference`, more than one captured (`GET /api/payment-intents/<id>` for each).
+3. Refund the extra charge (`POST /api/refunds/payment-intents/<id>` with its own key) and contact the merchant
+   about their client's key generation.
+
 <a id="payments-stuck"></a>
 ## PayflowPaymentsStuck (ticket)
 

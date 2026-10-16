@@ -1,6 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.operations.dto;
 
 import id.fatarc.portfolio.payflowreliability.ledger.dto.InvariantReport;
+import id.fatarc.portfolio.payflowreliability.operations.MoneyAtRiskService;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementService;
@@ -16,6 +17,7 @@ import java.util.Map;
  * @param stuckPayments      payments waiting on the provider longer than the sweeper threshold
  * @param awaitingSettlement net amounts the next payouts would pay, per merchant and currency
  * @param ledger             the most recent books-versus-operations consistency check
+ * @param moneyAtRisk        what is at risk right now, as amounts and counts, by kind
  */
 public record OperationsSummary(
         Instant generatedAt,
@@ -25,7 +27,8 @@ public record OperationsSummary(
         Refunds refunds,
         ProviderCalls providerCalls,
         List<SettlementService.Backlog> awaitingSettlement,
-        InvariantReport ledger
+        InvariantReport ledger,
+        MoneyAtRiskService.MoneyAtRisk moneyAtRisk
 ) {
     /**
      * @param oldestOpenedAt creation time of the oldest unresolved case, or null when the queue is empty

@@ -58,8 +58,16 @@ public class PaymentIntent {
     @Enumerated(EnumType.STRING)
     private PaymentState stateBeforeReview;
 
+    /** When the payment was handed to the provider (start). The checkout confirmation SLO is measured from here. */
+    private Instant startedAt;
+
     /** When the provider captured the money. Set once; drives the ledger capture journal. */
     private Instant capturedAt;
+
+    private Instant cancelledAt;
+
+    @Enumerated(EnumType.STRING)
+    private CancellationReason cancellationReason;
 
     /** Sum of refunds the provider confirmed. */
     @Column(nullable = false, precision = 19, scale = 4)
@@ -103,7 +111,25 @@ public class PaymentIntent {
     }
 
     public PaymentState start() {
-        return transitionTo(PENDING, "Only a newly created intent can be started.", CREATED);
+        return start(Instant.now());
+    }
+
+    public PaymentState start(Instant now) {
+        PaymentState previousState = transitionTo(PENDING, "Only a newly created intent can be started.", CREATED);
+        this.startedAt = now;
+        return previousState;
+    }
+
+    /**
+     * Withdraws a payment the customer has not paid. Anything authorized or captured has to be returned through
+     * the provider (a reversal) instead, so only CREATED and PENDING can be cancelled.
+     */
+    public PaymentState cancel(CancellationReason reason, Instant now) {
+        PaymentState previousState = transitionTo(CANCELLED, "Only a payment the customer has not paid can be cancelled.",
+                CREATED, PENDING);
+        this.cancellationReason = reason;
+        this.cancelledAt = now;
+        return previousState;
     }
 
     public PaymentState authorize() {
@@ -311,7 +337,10 @@ public class PaymentIntent {
     public String getRequestFingerprint() { return requestFingerprint; }
     public PaymentState getState() { return state; }
     public PaymentState getStateBeforeReview() { return stateBeforeReview; }
+    public Instant getStartedAt() { return startedAt; }
     public Instant getCapturedAt() { return capturedAt; }
+    public Instant getCancelledAt() { return cancelledAt; }
+    public CancellationReason getCancellationReason() { return cancellationReason; }
     public BigDecimal getRefundedAmount() { return Money.atScale(refundedAmount, currency); }
     public BigDecimal getReversedAmount() { return Money.atScale(reversedAmount, currency); }
     public Instant getLastProviderCheckAt() { return lastProviderCheckAt; }

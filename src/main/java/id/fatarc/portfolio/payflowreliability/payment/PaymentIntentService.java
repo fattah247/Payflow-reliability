@@ -2,6 +2,7 @@ package id.fatarc.portfolio.payflowreliability.payment;
 
 import id.fatarc.portfolio.payflowreliability.audit.AggregateType;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
+import id.fatarc.portfolio.payflowreliability.checkout.CheckoutMetrics;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.DatabaseErrors;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
@@ -15,6 +16,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Clock;
 import java.util.UUID;
 
 @Service
@@ -22,15 +24,21 @@ public class PaymentIntentService {
     private final PaymentIntentRepository paymentIntentRepository;
     private final MerchantService merchantService;
     private final AuditService auditService;
+    private final CheckoutMetrics checkoutMetrics;
+    private final Clock clock;
     private final TransactionTemplate transactionTemplate;
 
     public PaymentIntentService(PaymentIntentRepository paymentIntentRepository,
                                 MerchantService merchantService,
                                 AuditService auditService,
+                                CheckoutMetrics checkoutMetrics,
+                                Clock clock,
                                 PlatformTransactionManager transactionManager) {
         this.paymentIntentRepository = paymentIntentRepository;
         this.merchantService = merchantService;
         this.auditService = auditService;
+        this.checkoutMetrics = checkoutMetrics;
+        this.clock = clock;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -71,9 +79,28 @@ public class PaymentIntentService {
         if (intent.getState() == PaymentState.PENDING) {
             return intent;
         }
-        PaymentState previousState = intent.start();
+        PaymentState previousState = intent.start(clock.instant());
         auditService.recordStateChange(intent.getId(), previousState, intent.getState(), caller.name(),
                 "Payment execution started.", "merchantReference=" + intent.getMerchantReference());
+        return intent;
+    }
+
+    /**
+     * Withdraws a payment the customer has not paid. Cancelling a cancelled payment again returns it unchanged,
+     * so a retried cancel is safe. An abandoned checkout is counted as money lost to the checkout experience.
+     */
+    @Transactional
+    public PaymentIntent cancel(UUID paymentIntentId, CancellationReason reason, Caller caller) {
+        PaymentIntent intent = lockAccessible(paymentIntentId, caller);
+        if (intent.getState() == PaymentState.CANCELLED) {
+            return intent;
+        }
+        PaymentState previousState = intent.cancel(reason, clock.instant());
+        auditService.recordStateChange(intent.getId(), previousState, intent.getState(), caller.name(),
+                "Payment cancelled before the customer paid.", "reason=" + reason);
+        if (reason == CancellationReason.ABANDONED) {
+            checkoutMetrics.abandoned(intent);
+        }
         return intent;
     }
 
@@ -135,6 +162,7 @@ public class PaymentIntentService {
             throw new BusinessException(ErrorCode.IDEMPOTENCY_KEY_REUSED,
                     "Idempotency key " + idempotencyKey + " was already used for a different request payload.");
         }
+        checkoutMetrics.replayed("payment-intents.create");
         auditService.record(AggregateType.PAYMENT_INTENT, intent.getId().toString(), intent.getId(),
                 "IDEMPOTENCY_REPLAYED", caller.name(),
                 "Existing payment intent returned for a repeated request.",

@@ -2,6 +2,7 @@ package id.fatarc.portfolio.payflowreliability.payment;
 
 import id.fatarc.portfolio.payflowreliability.audit.AggregateType;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
+import id.fatarc.portfolio.payflowreliability.checkout.CheckoutMetrics;
 import id.fatarc.portfolio.payflowreliability.common.InvalidStateTransitionException;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerService;
 import id.fatarc.portfolio.payflowreliability.outbox.OutboxService;
@@ -46,6 +47,7 @@ public class ProviderWebhookService {
     private static final Logger log = LoggerFactory.getLogger(ProviderWebhookService.class);
     private static final String PROVIDER_ACTOR = "provider";
 
+    private final CheckoutMetrics checkoutMetrics;
     private final PaymentIntentRepository paymentIntentRepository;
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final ProviderEventRepository providerEventRepository;
@@ -64,9 +66,11 @@ public class ProviderWebhookService {
             AuditService auditService,
             LedgerService ledgerService,
             OutboxService outboxService,
+            CheckoutMetrics checkoutMetrics,
             MeterRegistry meterRegistry,
             Clock clock
     ) {
+        this.checkoutMetrics = checkoutMetrics;
         this.paymentIntentRepository = paymentIntentRepository;
         this.paymentTransactionRepository = paymentTransactionRepository;
         this.providerEventRepository = providerEventRepository;
@@ -159,6 +163,7 @@ public class ProviderWebhookService {
                 describe(webhook.status()), event.metadata());
         if (webhook.status() == ProviderStatus.SUCCESS) {
             ledgerService.capture(intent.getId(), intent.getMerchantId(), intent.getCurrency(), intent.getAmount());
+            checkoutMetrics.confirmed(intent);
         }
         if (webhook.status() == ProviderStatus.REVERSAL_REQUIRED) {
             outboxService.enqueueReversal(intent.getId());

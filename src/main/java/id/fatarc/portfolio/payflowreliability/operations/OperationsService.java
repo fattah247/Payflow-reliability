@@ -51,6 +51,7 @@ public class OperationsService {
     private final AuditService auditService;
     private final AuditChainVerifier auditChainVerifier;
     private final SettlementCertaintyService certaintyService;
+    private final MoneyAtRiskService moneyAtRiskService;
     private final Clock clock;
     private final Duration stuckAfter;
 
@@ -69,6 +70,7 @@ public class OperationsService {
                              AuditService auditService,
                              AuditChainVerifier auditChainVerifier,
                              SettlementCertaintyService certaintyService,
+                             MoneyAtRiskService moneyAtRiskService,
                              Clock clock,
                              @Value("${payflow.sweeper.stuck-after:15m}") Duration stuckAfter) {
         this.paymentIntentService = paymentIntentService;
@@ -86,6 +88,7 @@ public class OperationsService {
         this.auditService = auditService;
         this.auditChainVerifier = auditChainVerifier;
         this.certaintyService = certaintyService;
+        this.moneyAtRiskService = moneyAtRiskService;
         this.clock = clock;
         this.stuckAfter = stuckAfter;
     }
@@ -147,7 +150,8 @@ public class OperationsService {
                         outboxCommandRepository.countByStatus(CommandStatus.FAILED),
                         outboxCommandRepository.oldestPendingCreatedAt().orElse(null)),
                 settlementService.backlog(),
-                ledgerInvariantService.lastReport()
+                ledgerInvariantService.lastReport(),
+                moneyAtRiskService.compute()
         );
     }
 
@@ -179,6 +183,7 @@ public class OperationsService {
             case MANUAL_REVIEW -> "Operator decision on the hold (held from " + intent.getStateBeforeReview()
                     + "): resolve an open review case with RELEASE_PAYMENT, FAIL_PAYMENT or REQUIRE_REVERSAL.";
             case FAILED, EXPIRED -> "Nothing: " + intent.getState() + " is final.";
+            case CANCELLED -> "Nothing: cancelled before the customer paid (" + intent.getCancellationReason() + ").";
         };
         List<String> also = new ArrayList<>();
         refundInReview.ifPresent(refund -> also.add("refund " + refund.getId() + " needs an operator decision"));

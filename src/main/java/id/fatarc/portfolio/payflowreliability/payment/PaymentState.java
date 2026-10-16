@@ -15,5 +15,10 @@ public enum PaymentState {
     REVERSAL_REQUIRED,
     /** The provider confirmed the reversal. */
     REVERSED,
+    /**
+     * Withdrawn before the customer paid, for example because the customer abandoned the checkout. Final: a
+     * capture arriving afterwards contradicts it and goes to review instead of being applied.
+     */
+    CANCELLED,
     MANUAL_REVIEW
 }
