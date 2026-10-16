@@ -28,10 +28,13 @@ public class SimController {
     private final SimulatorProperties properties;
     private final SimRequestLog requestLog;
     private final SimLatency latency;
+    private final SimApiRequestRepository requests;
 
     public SimController(ProviderSimulator simulator, SimWebhookDispatcher dispatcher, SimFaults faults,
-                         SimulatorProperties properties, SimRequestLog requestLog, SimLatency latency) {
+                         SimulatorProperties properties, SimRequestLog requestLog, SimLatency latency,
+                         SimApiRequestRepository requests) {
         this.latency = latency;
+        this.requests = requests;
         this.simulator = simulator;
         this.dispatcher = dispatcher;
         this.faults = faults;
@@ -131,6 +134,18 @@ public class SimController {
                                              @PathVariable UUID paymentIntentId) {
         authenticate(authorization);
         return simulator.deliveries(paymentIntentId);
+    }
+
+    /** What the provider saw for one idempotency key: every request, and whether it was applied, replayed or refused. */
+    @GetMapping("/requests")
+    public List<Map<String, Object>> requests(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                              @RequestParam String idempotencyKey) {
+        authenticate(authorization);
+        return requests.findByIdempotencyKeyStartingWithOrderByReceivedAtAsc(idempotencyKey).stream()
+                .filter(request -> request.getIdempotencyKey().equals(idempotencyKey))
+                .map(request -> Map.<String, Object>of("operation", request.getOperation(), "outcome", request.getOutcome(),
+                        "receivedAt", request.getReceivedAt()))
+                .toList();
     }
 
     @PostMapping("/webhooks/dispatch")

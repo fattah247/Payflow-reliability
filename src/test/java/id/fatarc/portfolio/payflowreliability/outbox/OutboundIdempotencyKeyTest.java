@@ -16,6 +16,12 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.is;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * Keys on calls this service makes to the provider, seen from the provider's side (its request log).
@@ -61,7 +67,7 @@ class OutboundIdempotencyKeyTest extends IntegrationTest {
     }
 
     @Test
-    void shouldResendTheSameKeyAfterAWorkerDiesOnceTheProviderActed() {
+    void shouldResendTheSameKeyAfterAWorkerDiesOnceTheProviderActed() throws Exception {
         PaymentIntent intent = paidIntent("ORDER-OK-3", "50000");
         RefundRequest refund = requestRefund(intent, "20000", "refund-ok-3");
 
@@ -85,6 +91,13 @@ class OutboundIdempotencyKeyTest extends IntegrationTest {
                 .hasSize(1);
         assertThat(ledgerJournalRepository.existsByJournalTypeAndReference(JournalType.REFUND, refund.getId().toString())).isTrue();
         assertThat(reload(intent).getRefundedAmount()).isEqualByComparingTo("20000");
+
+        // The provider's own log, as an operator or a scenario reads it over HTTP.
+        mockMvc.perform(get("/provider-sim/v1/requests").param("idempotencyKey", "refund-" + refund.getId())
+                        .header("Authorization", "Bearer sim_test_provider_key"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.outcome == 'APPLIED')]", hasSize(1)))
+                .andExpect(jsonPath("$[*].operation", everyItem(is("REFUND"))));
     }
 
     @Test
