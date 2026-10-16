@@ -33,6 +33,14 @@ public class MoneyAtRiskService {
         ABANDONED,
         /** A merchant reference charged more than once: the extra charges (should always be zero). */
         DUPLICATE_CHARGES,
+        /** Held for manual review: no money moves until someone decides. */
+        HELD_FOR_REVIEW,
+        /** Open reconciliation breaks (ledger, provider and bank disagree), opened less than a day ago. */
+        BREAKS_OPEN_UNDER_1_DAY,
+        /** Open reconciliation breaks, one to three days old. */
+        BREAKS_OPEN_1_TO_3_DAYS,
+        /** Open reconciliation breaks, more than three days old. */
+        BREAKS_OPEN_OVER_3_DAYS,
         /** Stepped up by device risk, waiting for the customer's confirmation. */
         AWAITING_CONFIRMATION,
         /** Blocked by device risk since the start of the day. */
@@ -105,6 +113,19 @@ public class MoneyAtRiskService {
         duplicates.addAll(byCurrency.values());
         items.add(item(Kind.DUPLICATE_CHARGES, "Extra charges for a merchant reference already charged", duplicates, null));
 
+        items.add(item(Kind.HELD_FOR_REVIEW, "Payments held for manual review", entityManager.createQuery("""
+                select p.currency, count(p), sum(p.amount) from PaymentIntent p
+                where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.MANUAL_REVIEW
+                group by p.currency""", Object[].class).getResultList(), null));
+
+        // Breaks by age. A break about a whole statement carries no amount; it still counts.
+        items.add(breaks(Kind.BREAKS_OPEN_UNDER_1_DAY, "Open reconciliation breaks, under a day old",
+                now.minus(Duration.ofDays(1)), now.plusNanos(1)));
+        items.add(breaks(Kind.BREAKS_OPEN_1_TO_3_DAYS, "Open reconciliation breaks, one to three days old",
+                now.minus(Duration.ofDays(3)), now.minus(Duration.ofDays(1))));
+        items.add(breaks(Kind.BREAKS_OPEN_OVER_3_DAYS, "Open reconciliation breaks, over three days old",
+                Instant.EPOCH, now.minus(Duration.ofDays(3))));
+
         items.add(item(Kind.AWAITING_CONFIRMATION, "Payments waiting for a device-risk step-up confirmation",
                 entityManager.createQuery("""
                         select p.currency, count(p), sum(p.amount) from PaymentIntent p
@@ -116,6 +137,23 @@ public class MoneyAtRiskService {
                         where d.decision = id.fatarc.portfolio.payflowreliability.risk.RiskDecisionType.BLOCK and d.decidedAt >= :since
                         group by d.currency""", Object[].class).setParameter("since", startOfDay).getResultList(), null));
         return new MoneyAtRisk(now, List.copyOf(items));
+    }
+
+    /** Open breaks opened in [{@code from}, {@code before}). */
+    private Item breaks(Kind kind, String description, Instant from, Instant before) {
+        long count = entityManager.createQuery("""
+                select count(b) from ReconciliationBreak b
+                where b.status = id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus.OPEN
+                  and b.openedAt >= :from and b.openedAt < :before""", Long.class)
+                .setParameter("from", from).setParameter("before", before).getSingleResult();
+        List<Object[]> amounts = entityManager.createQuery("""
+                select b.currency, count(b), sum(b.amount) from ReconciliationBreak b
+                where b.status = id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus.OPEN
+                  and b.openedAt >= :from and b.openedAt < :before and b.amount is not null
+                group by b.currency""", Object[].class)
+                .setParameter("from", from).setParameter("before", before).getResultList();
+        Item item = item(kind, description, amounts, null);
+        return new Item(kind, description, count, item.amount(), null);
     }
 
     private static Item item(Kind kind, String description, List<Object[]> rows, Duration window) {
