@@ -1,7 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.bank;
 
-import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 
 import java.math.BigDecimal;
@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface BankStatementLineRepository extends JpaRepository<BankStatementLine, UUID> {
+public interface BankStatementLineRepository extends JpaRepository<BankStatementLine, UUID>, JpaSpecificationExecutor<BankStatementLine> {
     boolean existsByLineHash(String lineHash);
 
     List<BankStatementLine> findByStatementIdOrderByValueDateAscAccountServicerRefAsc(String statementId);
@@ -17,12 +17,6 @@ public interface BankStatementLineRepository extends JpaRepository<BankStatement
     List<BankStatementLine> findBySettlementBatchIdOrderByImportedAtAsc(UUID settlementBatchId);
 
     List<BankStatementLine> findByMatchStatusOrderByImportedAtAsc(BankLineStatus status);
-
-    List<BankStatementLine> findAllByOrderByImportedAtDesc(Pageable page);
-
-    List<BankStatementLine> findByMatchStatusOrderByImportedAtAsc(BankLineStatus status, Pageable page);
-
-    List<BankStatementLine> findByEndToEndIdOrderByImportedAtAsc(String endToEndId);
 
     Optional<BankStatementLine> findFirstByEndToEndIdAndCreditDebitAndMatchStatusOrderByImportedAtAsc(String endToEndId,
                                                                                                        String creditDebit,

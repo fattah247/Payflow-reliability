@@ -1,12 +1,13 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
-import org.springframework.data.domain.Pageable;
-import id.fatarc.portfolio.payflowreliability.common.ListLimit;
 import id.fatarc.portfolio.payflowreliability.audit.AggregateType;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.Keyset;
 import id.fatarc.portfolio.payflowreliability.common.Money;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerService;
 import id.fatarc.portfolio.payflowreliability.outbox.OutboxService;
 import id.fatarc.portfolio.payflowreliability.payment.*;
@@ -17,6 +18,7 @@ import jakarta.persistence.EntityManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -181,11 +183,11 @@ public class SettlementService {
 
     /** Newest first; optionally for one merchant. */
     @Transactional(readOnly = true)
-    public List<SettlementBatch> listBatches(String merchantId, Integer limit) {
-        Pageable newestFirst = ListLimit.first(limit, Sort.by(Sort.Direction.DESC, "createdAt"));
-        return merchantId == null || merchantId.isBlank()
-                ? settlementBatchRepository.findAll(newestFirst).getContent()
-                : settlementBatchRepository.findByMerchantId(merchantId, newestFirst);
+    public PageSlice<SettlementBatch> listBatches(String merchantId, PageCursor after, Integer limit) {
+        Specification<SettlementBatch> filter = merchantId == null || merchantId.isBlank() ? Keyset.all()
+                : (root, query, cb) -> cb.equal(root.get("merchantId"), merchantId);
+        return Keyset.page(settlementBatchRepository, filter, "createdAt", false, after, limit,
+                batch -> new PageCursor(batch.getCreatedAt(), batch.getId()));
     }
 
     @Transactional(readOnly = true)

@@ -1,5 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.reconciliation;
 
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakCategory;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakResolutionService;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus;
@@ -9,6 +11,7 @@ import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationR
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportResponse;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -44,10 +47,12 @@ public class ReconciliationController {
 
     /** ?status=OPEN|RESOLVED (default: all), optionally one category or one batch. Oldest first when filtered by status. */
     @GetMapping("/breaks")
-    public List<BreakView> breaks(@RequestParam(required = false) BreakStatus status,
-                                  @RequestParam(required = false) BreakCategory category,
-                                  @RequestParam(required = false) UUID batchId) {
-        return breakResolutionService.list(status, category, batchId);
+    public ResponseEntity<List<BreakView>> breaks(@RequestParam(required = false) BreakStatus status,
+                                                  @RequestParam(required = false) BreakCategory category,
+                                                  @RequestParam(required = false) UUID batchId,
+                                                  @RequestParam(required = false) Integer limit,
+                                                  @RequestParam(required = false) String after) {
+        return PageResponses.of(breakResolutionService.page(status, category, batchId, PageCursor.decode(after), limit));
     }
 
     @GetMapping("/breaks/{breakId}")

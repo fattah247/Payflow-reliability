@@ -2,6 +2,7 @@ package id.fatarc.portfolio.payflowreliability.outbox;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -11,7 +12,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface OutboxCommandRepository extends JpaRepository<OutboxCommand, UUID> {
+public interface OutboxCommandRepository extends JpaRepository<OutboxCommand, UUID>, JpaSpecificationExecutor<OutboxCommand> {
     @Query("""
             select c.id from OutboxCommand c
             where c.status = id.fatarc.portfolio.payflowreliability.outbox.CommandStatus.PENDING
@@ -58,10 +59,6 @@ public interface OutboxCommandRepository extends JpaRepository<OutboxCommand, UU
     List<OutboxCommand> findByPaymentIntentIdAndCommandTypeOrderByCreatedAtAsc(UUID paymentIntentId, CommandType commandType);
 
     List<OutboxCommand> findByStatusOrderByCreatedAtAsc(CommandStatus status);
-
-    List<OutboxCommand> findByStatusOrderByCreatedAtAsc(CommandStatus status, Pageable page);
-
-    List<OutboxCommand> findAllByOrderByCreatedAtDesc(Pageable page);
 
     long countByStatus(CommandStatus status);
 

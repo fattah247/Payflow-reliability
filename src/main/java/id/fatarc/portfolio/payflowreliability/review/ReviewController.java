@@ -2,6 +2,8 @@ package id.fatarc.portfolio.payflowreliability.review;
 
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
 import id.fatarc.portfolio.payflowreliability.review.dto.ResolveReviewCaseRequest;
 import id.fatarc.portfolio.payflowreliability.review.dto.ReviewCaseView;
 import id.fatarc.portfolio.payflowreliability.review.dto.ReviewNoteRequest;
@@ -31,10 +33,13 @@ public class ReviewController {
      * OPEN, AWAITING_APPROVAL, RESOLVED, or ALL.
      */
     @GetMapping
-    public List<ReviewCaseView> list(@RequestParam(defaultValue = "UNRESOLVED") String status,
-                                     @RequestParam(required = false) ReviewReason reason,
-                                     @RequestParam(required = false) UUID paymentIntentId) {
-        return reviewWorkflowService.list(parseStatus(status), reason, paymentIntentId);
+    public ResponseEntity<List<ReviewCaseView>> list(@RequestParam(defaultValue = "UNRESOLVED") String status,
+                                                     @RequestParam(required = false) ReviewReason reason,
+                                                     @RequestParam(required = false) UUID paymentIntentId,
+                                                     @RequestParam(required = false) Integer limit,
+                                                     @RequestParam(required = false) String after) {
+        return PageResponses.of(reviewWorkflowService.page(parseStatus(status), reason, paymentIntentId,
+                PageCursor.decode(after), limit));
     }
 
     @GetMapping("/{reviewCaseId}")

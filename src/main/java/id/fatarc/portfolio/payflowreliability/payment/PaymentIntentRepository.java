@@ -3,6 +3,7 @@ package id.fatarc.portfolio.payflowreliability.payment;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -13,7 +14,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UUID> {
+public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UUID>, JpaSpecificationExecutor<PaymentIntent> {
     /** Locked, so concurrent replays of one key are serialized (each writes to the payment's audit chain). */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from PaymentIntent p where p.merchantId = :merchantId and p.idempotencyKey = :key")
@@ -29,9 +30,6 @@ public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UU
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from PaymentIntent p where p.id = :id")
     Optional<PaymentIntent> findForUpdate(@Param("id") UUID id);
-
-    List<PaymentIntent> findByMerchantIdAndMerchantReferenceOrderByCreatedAtDesc(String merchantId, String merchantReference,
-                                                                                 Pageable page);
 
     /**
      * Locks several payments in id order. A fixed order means two callers locking overlapping

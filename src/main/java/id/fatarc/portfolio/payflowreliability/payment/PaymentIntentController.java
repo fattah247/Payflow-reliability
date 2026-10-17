@@ -1,5 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CancelPaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.ConfirmStepUpRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
@@ -58,12 +60,14 @@ public class PaymentIntentController {
         return PaymentIntentResponse.from(paymentIntentService.cancel(paymentIntentId, request.reason(), caller));
     }
 
-    /** The caller's payments for one merchant reference, newest first (at most 50). Operators also pass merchantId. */
+    /** The caller's payments for one merchant reference, newest first, a page at a time. Operators also pass merchantId. */
     @GetMapping
-    public List<PaymentIntentResponse> findByReference(@RequestParam String merchantReference,
-                                                       @RequestParam(required = false) String merchantId, Caller caller) {
-        return paymentIntentService.findByReference(merchantReference, merchantId, caller).stream()
-                .map(PaymentIntentResponse::from).toList();
+    public ResponseEntity<List<PaymentIntentResponse>> findByReference(@RequestParam String merchantReference,
+                                                                       @RequestParam(required = false) String merchantId,
+                                                                       @RequestParam(required = false) Integer limit,
+                                                                       @RequestParam(required = false) String after, Caller caller) {
+        return PageResponses.of(paymentIntentService.findByReference(merchantReference, merchantId, caller, PageCursor.decode(after), limit)
+                .map(rows -> rows.stream().map(PaymentIntentResponse::from).toList()));
     }
 
     @GetMapping("/{paymentIntentId}")

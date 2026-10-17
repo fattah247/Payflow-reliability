@@ -4,13 +4,18 @@ import id.fatarc.portfolio.payflowreliability.bank.BankStatementLine;
 import id.fatarc.portfolio.payflowreliability.bank.BankStatementLineRepository;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.Keyset;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import id.fatarc.portfolio.payflowreliability.reconciliation.PaymentReconciler;
 import id.fatarc.portfolio.payflowreliability.reconciliation.PayoutMatcher;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -30,6 +35,28 @@ public class BreakResolutionService {
         this.matcher = matcher;
         this.breakService = breakService;
         this.clock = clock;
+    }
+
+    /**
+     * One page of breaks: oldest first when filtered by status (a queue), newest first otherwise, with the category and
+     * batch filters applied in the query.
+     */
+    @Transactional(readOnly = true)
+    public PageSlice<BreakView> page(BreakStatus status, BreakCategory category, UUID batchId, PageCursor after, Integer limit) {
+        Specification<ReconciliationBreak> filter = Keyset.all();
+        if (status != null) {
+            filter = filter.and((root, query, cb) -> cb.equal(root.get("status"), status));
+        }
+        if (category != null) {
+            filter = filter.and((root, query, cb) -> cb.equal(root.get("category"), category));
+        }
+        if (batchId != null) {
+            filter = filter.and((root, query, cb) -> cb.equal(root.get("settlementBatchId"), batchId));
+        }
+        Instant now = clock.instant();
+        return Keyset.page(repository, filter, "openedAt", status != null, after, limit,
+                        open -> new PageCursor(open.getOpenedAt(), open.getId()))
+                .map(rows -> rows.stream().map(open -> BreakView.of(open, now)).toList());
     }
 
     @Transactional(readOnly = true)

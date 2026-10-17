@@ -1,6 +1,9 @@
 package id.fatarc.portfolio.payflowreliability.outbox;
 
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -18,11 +21,12 @@ public class OutboxController {
         this.outboxWorker = outboxWorker;
     }
 
-    /** Newest first, or oldest first within one status; at most {@code limit} (default 100, at most 1000). */
+    /** Newest first, or oldest first within one status, a page at a time ({@code limit}, {@code after}). */
     @GetMapping
-    public List<OutboxCommand> list(@RequestParam(required = false) CommandStatus status,
-                                    @RequestParam(required = false) Integer limit) {
-        return outboxService.list(status, limit);
+    public ResponseEntity<List<OutboxCommand>> list(@RequestParam(required = false) CommandStatus status,
+                                                    @RequestParam(required = false) Integer limit,
+                                                    @RequestParam(required = false) String after) {
+        return PageResponses.of(outboxService.list(status, PageCursor.decode(after), limit));
     }
 
     @GetMapping("/{commandId}")

@@ -1,13 +1,16 @@
 package id.fatarc.portfolio.payflowreliability.outbox;
 
-import id.fatarc.portfolio.payflowreliability.common.ListLimit;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.Keyset;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentIntentRepository;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatchRepository;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -118,10 +121,10 @@ public class OutboxService {
     }
 
     @Transactional(readOnly = true)
-    public List<OutboxCommand> list(CommandStatus status, Integer limit) {
-        return status == null
-                ? repository.findAllByOrderByCreatedAtDesc(ListLimit.first(limit))
-                : repository.findByStatusOrderByCreatedAtAsc(status, ListLimit.first(limit));
+    public PageSlice<OutboxCommand> list(CommandStatus status, PageCursor after, Integer limit) {
+        Specification<OutboxCommand> filter = status == null ? Keyset.all() : (root, query, cb) -> cb.equal(root.get("status"), status);
+        return Keyset.page(repository, filter, "createdAt", status != null, after, limit,
+                command -> new PageCursor(command.getCreatedAt(), command.getId()));
     }
 
     @Transactional(readOnly = true)
