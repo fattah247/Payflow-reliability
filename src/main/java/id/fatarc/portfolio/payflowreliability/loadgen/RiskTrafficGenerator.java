@@ -12,7 +12,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -123,8 +122,10 @@ public class RiskTrafficGenerator {
             for (Future<Result> future : futures) {
                 results.add(future.get());
             }
-            // Time passes: step-ups nobody confirmed expire. Then the generator discloses its ground truth.
-            riskService.expireUnconfirmed(Duration.ZERO);
+            // Time passes for these customers: their unconfirmed step-ups expire (nobody else's). Then the generator
+            // discloses its ground truth.
+            riskService.expire(results.stream().filter(result -> result.what().equals("stepped up, not confirmed"))
+                    .map(Result::paymentId).toList());
             Tally legitimate = Tally.zero();
             Tally fraud = Tally.zero();
             Map<String, Tally> legitimateBy = new LinkedHashMap<>();

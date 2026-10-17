@@ -3,6 +3,7 @@ package id.fatarc.portfolio.payflowreliability.risk;
 import id.fatarc.portfolio.payflowreliability.loadgen.RiskTrafficGenerator;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentIntent;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
+import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.support.IntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -129,6 +130,20 @@ class RiskReportTest extends IntegrationTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.rows.length()").value(6))
                 .andExpect(jsonPath("$.merchantId").value(MERCHANT_A))
                 .andExpect(jsonPath("$.rows[2].current").value(true));
+    }
+
+    @Test
+    void shouldExpireOnlyItsOwnCustomersStepUps() {
+        RiskEvidence emulator = new RiskEvidence("device-other", null, false, true, List.of(
+                new RiskEvidence.Signal("emulator_fingerprint", "EMULATOR", SignalSeverity.MEDIUM, SignalSource.DEVICE_CHECK)));
+        PaymentIntent waiting = paymentIntentService.create(new CreatePaymentIntentRequest(null, "OTHER-SHOP-1",
+                new BigDecimal("200000"), "IDR", RiskAction.PHYSICAL_GOODS, emulator), "key-OTHER-SHOP-1", AS_MERCHANT_B).intent();
+
+        run(42);
+
+        assertThat(stateOf(waiting)).as("another shop's customer is still deciding").isEqualTo(PaymentState.REQUIRES_CONFIRMATION);
+        assertThat(reportService.report("IDR", MERCHANT_A).stepUpAwaiting().count()).isZero();
+        assertThat(reportService.report("IDR", MERCHANT_B).stepUpAwaiting().count()).isEqualTo(1);
     }
 
     @Test

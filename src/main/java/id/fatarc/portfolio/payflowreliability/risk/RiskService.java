@@ -17,6 +17,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -115,12 +116,18 @@ public class RiskService {
         List<UUID> stale = transactions.execute(status -> decisions
                 .findByOutcomeAndDecidedAtBefore(RiskOutcome.AWAITING_CONFIRMATION, cutoff.plusNanos(1)).stream()
                 .map(RiskDecision::getPaymentIntentId).toList());
+        return expire(stale);
+    }
+
+    /** Expires these payments' step-ups now, if they are still waiting; others are left alone. */
+    public int expire(Collection<UUID> paymentIntentIds) {
         int expired = 0;
-        for (UUID paymentId : stale) {
+        for (UUID paymentId : paymentIntentIds) {
             Boolean done = transactions.execute(status -> {
-                PaymentIntent intent = payments.findForUpdate(paymentId).orElseThrow();
-                RiskDecision decision = decisions.findByPaymentIntentId(paymentId).orElseThrow();
-                if (intent.getState() != PaymentState.REQUIRES_CONFIRMATION || decision.getOutcome() != RiskOutcome.AWAITING_CONFIRMATION) {
+                PaymentIntent intent = payments.findForUpdate(paymentId).orElse(null);
+                RiskDecision decision = decisions.findByPaymentIntentId(paymentId).orElse(null);
+                if (intent == null || decision == null || intent.getState() != PaymentState.REQUIRES_CONFIRMATION
+                        || decision.getOutcome() != RiskOutcome.AWAITING_CONFIRMATION) {
                     return false;
                 }
                 PaymentState previous = intent.expire();
