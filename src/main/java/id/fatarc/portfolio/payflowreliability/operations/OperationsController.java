@@ -14,13 +14,26 @@ public class OperationsController {
     private final PaymentStatusSweeper sweeper;
     private final MoneyInvariantService moneyInvariantService;
     private final MoneyAtRiskService moneyAtRiskService;
+    private final WorklistService worklistService;
 
     public OperationsController(OperationsService operationsService, PaymentStatusSweeper sweeper,
-                                MoneyInvariantService moneyInvariantService, MoneyAtRiskService moneyAtRiskService) {
+                                MoneyInvariantService moneyInvariantService, MoneyAtRiskService moneyAtRiskService,
+                                WorklistService worklistService) {
         this.operationsService = operationsService;
         this.sweeper = sweeper;
         this.moneyInvariantService = moneyInvariantService;
         this.moneyAtRiskService = moneyAtRiskService;
+        this.worklistService = worklistService;
+    }
+
+    /**
+     * Everything waiting for a person, most urgent first: who should act, what money is involved, by when, what to do
+     * next and the calls that do it. {@code owner}: OPERATIONS, TREASURY or PROVIDER_OPERATIONS.
+     */
+    @GetMapping("/api/operations/worklist")
+    public WorklistService.Worklist worklist(@RequestParam(required = false) String owner,
+                                             @RequestParam(required = false) Integer limit) {
+        return worklistService.worklist(WorklistService.owner(owner), limit);
     }
 
     /** Money at risk now, by kind, as counts and amounts; for one merchant when {@code merchantId} is given. */

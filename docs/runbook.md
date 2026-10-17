@@ -7,13 +7,16 @@ alert means, why it matters for money, and what to do. All endpoints need an ope
 General first steps for any payment-level problem:
 
 ```bash
+curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/worklist | jq '.items[] | {title, owner, dueAt, overdue, nextStep}'
 curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/summary | jq
 curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/money-at-risk | jq '.items[] | select(.count > 0)'
 curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/invariants | jq '.rules[] | select(.holds | not)'
 curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/payment-intents/<id>/case-file | jq '.attention'
 ```
 
-Money at risk says where money is waiting (past the SLO, abandoned, held, in breaks by age, awaiting a step-up,
+The worklist is everything waiting for a person, most urgent first: who should act, the money, the due time, the next
+step and the exact calls that resolve each item (for a credit nobody could match, the payout it most likely belongs
+to). Money at risk says where money is waiting (past the SLO, abandoned, held, in breaks by age, awaiting a step-up,
 blocked today); the invariants say which money rule is broken and for which records. The case file shows the
 payment, what is known at each stage of its money and the evidence (`certainty`), its device-risk decision,
 provider events, provider calls (outbox), refunds, settlement items, ledger journals, review cases, whether the
