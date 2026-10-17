@@ -7,7 +7,7 @@
 # Scenarios: idempotency, duplicate-webhook, amount-mismatch, provider-outage, lost-webhook, settlement,
 #            reconciliation, four-eyes, security, audit-trail,
 #            outbound-key-crash, bank-reconciliation, fee-deduction, missing-credit, returned-payout,
-#            statement-reimport, slow-but-up, device-risk, chaos
+#            statement-reimport, slow-but-up, device-risk, chaos, merchant-webhooks
 #
 # Simulated customers (slow-but-up, device-risk) and the chaos run are seeded: the same seed plays the same
 # customers and the same faults. Their parameters are model assumptions, never real data.
@@ -1148,15 +1148,127 @@ PY
   check "and across the whole system, right now" "$(as_ops request GET /api/operations/invariants ""; pick allHold)" "true"
 }
 
+scenario_merchant_webhooks() {
+  header "Telling the shop: signed webhooks, retries, order and catch-up" \
+    "Every change reaches the shop once and in order, even when its server fails, answers late or changes its secret."
+
+  local shop="shop-$RUN_ID" sim="/merchant-sim/v1/shops/shop-$RUN_ID"
+  as_merchant request PUT /api/webhook-endpoint "{\"url\": \"$BASE_URL$sim/webhooks\"}"
+  local registered="$STATUS" secret
+  secret=$(pick secret)
+  anonymous request PUT "$sim/secret" "{\"secret\": \"$secret\"}"
+  show "shop registers its endpoint" "HTTP $registered, secret ${secret:0:10}... shown once"
+
+  local payment
+  payment=$(paid "WH-$RUN_ID" 150000)
+  wait_for_shop "$sim" "payment" "$payment" 3
+  section "a payment, as the shop received it"
+  shop_deliveries "$sim"
+
+  section "the shop is down for one delivery while a refund completes"
+  anonymous request POST "$sim/faults" '{"failNext": 1, "status": 503}'
+  as_merchant request POST "/api/refunds/payment-intents/$payment" '{"amount": 50000, "reason": "Customer request"}' \
+    "Idempotency-Key: refund-WH-$RUN_ID"
+  local refund
+  refund=$(pick id)
+  wait_for_refund "$refund" COMPLETED >/dev/null
+  wait_for_shop "$sim" "refund" "$refund" 1
+  as_merchant request GET "/api/events?paymentIntentId=$payment&type=refund.created" ""
+  local created_event
+  created_event=$(pick 0.id)
+  show "refund.created" "$(pick 0.status), attempt $(pick 0.attempts): $(pick 0.lastError)"
+  as_merchant request POST "/api/events/$created_event/redeliver" ""
+  wait_for_deliveries "$sim" 6
+  shop_deliveries "$sim" refund.
+
+  section "the shop's signing secret is rotated"
+  as_merchant request POST /api/webhook-endpoint/rotate-secret ""
+  local next_secret until
+  next_secret=$(pick secret)
+  until=$(pick previousSecretSignsUntil)
+  show "new secret" "${next_secret:0:10}...; the previous one also signs until $until"
+  create_payment "WH-ROT-$RUN_ID" 1000
+  local rotation_payment
+  rotation_payment=$(pick id)
+  wait_for_deliveries "$sim" 7
+  show "shop still on the old secret" "$(last_delivery "$sim")"
+  anonymous request PUT "$sim/secret" "{\"secret\": \"$next_secret\"}"
+  start_payment "$rotation_payment"
+  wait_for_deliveries "$sim" 8
+  show "after the shop switches" "$(last_delivery "$sim")"
+  local forged_status
+  forged_status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL$sim/webhooks" -H 'Content-Type: application/json' \
+    -H "Payflow-Signature: t=$(date +%s),v1=0000000000000000000000000000000000000000000000000000000000000000" \
+    --data-binary "{\"id\": \"forged-$RUN_ID\", \"type\": \"payment.updated\", \"sequence\": 99, \"data\": {\"paymentIntentId\": \"$payment\", \"state\": \"REFUNDED\"}}")
+  show "a forged delivery (wrong signature)" "HTTP $forged_status"
+
+  section "the events list: the record a shop catches up from"
+  as_merchant request GET "/api/events?paymentIntentId=$payment" ""
+  json '"\n".join("%-16s seq %-2s %-10s %-10s attempts %s" % (e["type"], e["sequence"], e["state"], e["status"], e["attempts"]) for e in b)' \
+    | sed 's/^/   /'
+  local all_delivered
+  all_delivered=$(json 'all(e["status"] == "DELIVERED" for e in b)')
+
+  anonymous request GET "$sim" ""
+  printf '%s' "$BODY" > "$WORK_DIR/shop.json"
+  checks
+  check "the shop applied the payment's latest state" \
+    "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["payments"][sys.argv[2]]; print(p["state"], p["sequence"])' "$WORK_DIR/shop.json" "$payment")" "SUCCESS 3"
+  check "the shop applied the completed refund" \
+    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["refunds"][sys.argv[2]]["state"])' "$WORK_DIR/shop.json" "$refund")" "COMPLETED"
+  check "the late copy of refund.created was ignored as stale" \
+    "$(python3 -c 'import json,sys; print([d["outcome"] for d in json.load(open(sys.argv[1]))["deliveries"] if d["type"] == "refund.created"])' "$WORK_DIR/shop.json")" "['FAULT', 'STALE']"
+  check "during the rotation overlap deliveries carry both signatures" \
+    "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["deliveries"]; print(d[6]["signatures"], d[6]["outcome"], d[7]["outcome"])' "$WORK_DIR/shop.json")" "2 APPLIED APPLIED"
+  check "a forged delivery is refused by the shop" "$forged_status" "401"
+  check "every event of the payment delivered" "$all_delivered" "True"
+  check "every payment change announced (money rule)" "$(rule_holds PAYMENT_CHANGES_ANNOUNCED)" "True"
+}
+
+# wait_for_shop SIM KIND ID SEQUENCE  -> until the simulated shop has applied an event of that payment or refund
+wait_for_shop() {
+  local sim="$1" kind="$2" id="$3" sequence="$4" i
+  for ((i = 0; i < 40; i++)); do
+    anonymous request GET "$sim" ""
+    if [ "$(json "len([d for d in b['deliveries'] if d['outcome'] == 'APPLIED' and (d['paymentIntentId'] == '$id' if '$kind' == 'payment' else True) and d['type'].startswith('$kind')])")" -ge "$sequence" ] 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+}
+
+# wait_for_deliveries SIM COUNT  -> until the simulated shop has received COUNT deliveries
+wait_for_deliveries() {
+  local sim="$1" count="$2" i
+  for ((i = 0; i < 40; i++)); do
+    anonymous request GET "$sim" ""
+    if [ "$(json 'len(b["deliveries"])')" -ge "$count" ]; then return 0; fi
+    sleep 0.5
+  done
+}
+
+# shop_deliveries SIM [TYPE_PREFIX]  -> what the simulated shop received, in arrival order
+shop_deliveries() {
+  anonymous request GET "$1" ""
+  json '"\n".join("%-16s seq %-2s %-10s signatures %s  %s" % (d["type"], d["sequence"], d["state"], d["signatures"], d["outcome"]) for d in b["deliveries"] if d["type"].startswith("'"${2:-}"'"))' \
+    | sed 's/^/   /'
+}
+
+# last_delivery SIM  -> the shop's most recent delivery, on one line
+last_delivery() {
+  anonymous request GET "$1" ""
+  json '"%s seq %s, %s signature(s), %s" % (b["deliveries"][-1]["type"], b["deliveries"][-1]["sequence"], b["deliveries"][-1]["signatures"], b["deliveries"][-1]["outcome"])'
+}
+
 usage() {
-  echo "usage: $0 <idempotency|duplicate-webhook|amount-mismatch|provider-outage|lost-webhook|settlement|reconciliation|four-eyes|security|audit-trail|outbound-key-crash|bank-reconciliation|fee-deduction|missing-credit|returned-payout|statement-reimport|slow-but-up|device-risk|chaos>" >&2
+  echo "usage: $0 <idempotency|duplicate-webhook|amount-mismatch|provider-outage|lost-webhook|settlement|reconciliation|four-eyes|security|audit-trail|outbound-key-crash|bank-reconciliation|fee-deduction|missing-credit|returned-payout|statement-reimport|slow-but-up|device-risk|chaos|merchant-webhooks>" >&2
 }
 
 require_tools
 case "${1:-}" in
   idempotency | duplicate-webhook | amount-mismatch | provider-outage | lost-webhook | settlement | reconciliation | four-eyes | \
     security | audit-trail | outbound-key-crash | bank-reconciliation | fee-deduction | missing-credit | returned-payout | \
-    statement-reimport | slow-but-up | device-risk | chaos)
+    statement-reimport | slow-but-up | device-risk | chaos | merchant-webhooks)
     onboard_merchant "merchant-$RUN_ID"
     "scenario_${1//-/_}"
     ;;

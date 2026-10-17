@@ -102,7 +102,7 @@ jobs:
           for scenario in idempotency duplicate-webhook amount-mismatch provider-outage lost-webhook \
                           settlement reconciliation four-eyes security audit-trail \
                           outbound-key-crash bank-reconciliation fee-deduction missing-credit returned-payout \
-                          statement-reimport slow-but-up device-risk chaos; do
+                          statement-reimport slow-but-up device-risk merchant-webhooks chaos; do
             ./scripts/scenarios.sh "$scenario"
           done
       - name: Run the walkthrough
