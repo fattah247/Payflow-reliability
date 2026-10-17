@@ -20,8 +20,6 @@ public interface ReconciliationBreakRepository extends JpaRepository<Reconciliat
 
     List<ReconciliationBreak> findByStatusOrderByOpenedAtAsc(BreakStatus status);
 
-    List<ReconciliationBreak> findAllByOrderByOpenedAtDesc();
-
     List<ReconciliationBreak> findBySettlementBatchIdOrderByOpenedAtAsc(UUID settlementBatchId);
 
     List<ReconciliationBreak> findByBankLineIdAndStatus(UUID bankLineId, BreakStatus status);

@@ -60,16 +60,6 @@ public class BreakResolutionService {
     }
 
     @Transactional(readOnly = true)
-    public List<BreakView> list(BreakStatus status, BreakCategory category, UUID batchId) {
-        return (status == null ? repository.findAllByOrderByOpenedAtDesc() : repository.findByStatusOrderByOpenedAtAsc(status))
-                .stream()
-                .filter(b -> category == null || b.getCategory() == category)
-                .filter(b -> batchId == null || batchId.equals(b.getSettlementBatchId()))
-                .map(b -> BreakView.of(b, clock.instant()))
-                .toList();
-    }
-
-    @Transactional(readOnly = true)
     public BreakView get(UUID breakId) {
         return BreakView.of(repository.findById(breakId).orElseThrow(() -> notFound(breakId)), clock.instant());
     }

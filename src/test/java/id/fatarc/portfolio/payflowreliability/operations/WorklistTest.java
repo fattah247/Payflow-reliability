@@ -71,7 +71,7 @@ class WorklistTest extends IntegrationTest {
     void shouldPutEverythingWaitingForAPersonInOneQueueMostUrgentFirst() {
         aBusyMorning();
 
-        WorklistService.Worklist worklist = worklistService.worklist(null, null);
+        WorklistService.Worklist worklist = worklistService.worklist(null, null, null);
 
         assertThat(titles(worklist)).as("due order: a proposal within 1 h, review cases within 4 h, breaks by category")
                 .first().asString().startsWith("APPROVAL: Approve REQUIRE_REVERSAL");
@@ -103,7 +103,7 @@ class WorklistTest extends IntegrationTest {
     @Test
     void shouldHandOutCallsThatActuallyResolveTheItem() throws Exception {
         aBusyMorning();
-        WorklistService.Item unmatched = worklistService.worklist(WorklistService.Owner.TREASURY, null).items().stream()
+        WorklistService.Item unmatched = worklistService.worklist(WorklistService.Owner.TREASURY, null, null).items().stream()
                 .filter(item -> item.title().startsWith("Unmatched credit")).findFirst().orElseThrow();
         WorklistService.Action assign = unmatched.actions().getFirst();
         var body = objectMapper.createObjectNode();
@@ -114,7 +114,7 @@ class WorklistTest extends IntegrationTest {
                 .andExpect(status().isOk());
 
         assertThat(reload(referenceless).getPayoutStatus()).isEqualTo(PayoutStatus.LANDED);
-        WorklistService.Worklist after = worklistService.worklist(null, null);
+        WorklistService.Worklist after = worklistService.worklist(null, null, null);
         assertThat(titles(after)).as("the credit and the payout's missing-credit break are both explained")
                 .noneMatch(title -> title.contains("Unmatched credit")).filteredOn(title -> title.contains("Missing credit")).hasSize(1);
         assertThat(after.items()).extracting(WorklistService.Item::settlementBatchId).doesNotContain(referenceless.getId());
@@ -144,10 +144,36 @@ class WorklistTest extends IntegrationTest {
     }
 
     @Test
+    void shouldPageThroughTheWholeWorklistInOrderWithoutGapsOrRepeats() throws Exception {
+        aBusyMorning();
+        List<java.util.UUID> everything = worklistService.worklist(null, null, null).items().stream().map(WorklistService.Item::id).toList();
+
+        List<java.util.UUID> paged = new ArrayList<>();
+        String after = null;
+        int pages = 0;
+        do {
+            var request = get("/api/operations/worklist").param("limit", "2");
+            if (after != null) {
+                request.param("after", after);
+            }
+            var response = mockMvc.perform(as(OPS_ANA_KEY, request)).andExpect(status().isOk()).andReturn().getResponse();
+            JsonNode page = objectMapper.readTree(response.getContentAsString());
+            page.path("items").forEach(item -> paged.add(java.util.UUID.fromString(item.path("id").asText())));
+            after = page.path("next").isNull() ? null : page.path("next").asText();
+            assertThat(response.getHeader("X-Next-After")).isEqualTo(after);
+            pages++;
+        } while (after != null && pages < 20);
+
+        assertThat(everything).hasSizeGreaterThan(4);
+        assertThat(paged).as("page by page, the same items in the same order").containsExactlyElementsOf(everything);
+        assertThat(pages).isEqualTo((everything.size() + 1) / 2);
+    }
+
+    @Test
     void shouldBeEmptyWhenNothingWaits() {
         paidIntent("WL-CALM", "1000");
 
-        WorklistService.Worklist worklist = worklistService.worklist(null, null);
+        WorklistService.Worklist worklist = worklistService.worklist(null, null, null);
 
         assertThat(worklist.items()).isEmpty();
         assertThat(worklist.summary().items()).isZero();

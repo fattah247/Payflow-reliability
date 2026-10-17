@@ -1,8 +1,11 @@
 package id.fatarc.portfolio.payflowreliability.operations;
 
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
 import id.fatarc.portfolio.payflowreliability.operations.dto.OperationsSummary;
 import id.fatarc.portfolio.payflowreliability.operations.dto.PaymentCaseFile;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentStatusSweeper;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
@@ -31,9 +34,11 @@ public class OperationsController {
      * next and the calls that do it. {@code owner}: OPERATIONS, TREASURY or PROVIDER_OPERATIONS.
      */
     @GetMapping("/api/operations/worklist")
-    public WorklistService.Worklist worklist(@RequestParam(required = false) String owner,
-                                             @RequestParam(required = false) Integer limit) {
-        return worklistService.worklist(WorklistService.owner(owner), limit);
+    public ResponseEntity<WorklistService.Worklist> worklist(@RequestParam(required = false) String owner,
+                                                             @RequestParam(required = false) Integer limit,
+                                                             @RequestParam(required = false) String after) {
+        WorklistService.Worklist worklist = worklistService.worklist(WorklistService.owner(owner), PageCursor.decode(after), limit);
+        return PageResponses.withNext(worklist, worklist.next());
     }
 
     /** Money at risk now, by kind, as counts and amounts; for one merchant when {@code merchantId} is given. */

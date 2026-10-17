@@ -110,5 +110,7 @@ class PagingTest extends IntegrationTest {
         mockMvc.perform(as(OPS_ANA_KEY, get("/api/review-cases").param("after", "not-a-cursor")))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/operations/worklist").param("after", "bWFkZS11cA")))
+                .andExpect(status().isBadRequest());
     }
 }
