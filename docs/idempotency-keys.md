@@ -96,6 +96,19 @@ Keys are scoped to the caller and the operation: merchant A and merchant B can b
 same refund key on two different payments creates two refunds. Within one scope, a key names exactly one
 operation.
 
+### 6. Lost the key? Look the payment up by your own reference
+
+If your process crashed after sending the request but before it stored the key, you cannot retry safely: a new
+key would be a new payment. Find what happened by the reference you gave the payment instead:
+
+```bash
+curl -H "Authorization: Bearer $MERCHANT_KEY" "localhost:8080/api/payment-intents?merchantReference=checkout-1001"
+```
+
+It returns your payments with that reference, newest first (at most 50; never another merchant's). An empty list
+means the request never created anything, and a new attempt is safe. Store the key before the first attempt and
+this is never needed.
+
 ## The same rules apply to us
 
 Payflow is a client too, of the payment provider. The calls it makes follow the same contract:

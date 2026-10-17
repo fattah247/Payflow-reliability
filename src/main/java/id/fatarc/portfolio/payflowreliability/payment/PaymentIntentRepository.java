@@ -1,6 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -28,6 +29,9 @@ public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UU
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from PaymentIntent p where p.id = :id")
     Optional<PaymentIntent> findForUpdate(@Param("id") UUID id);
+
+    List<PaymentIntent> findByMerchantIdAndMerchantReferenceOrderByCreatedAtDesc(String merchantId, String merchantReference,
+                                                                                 Pageable page);
 
     /**
      * Locks several payments in id order. A fixed order means two callers locking overlapping

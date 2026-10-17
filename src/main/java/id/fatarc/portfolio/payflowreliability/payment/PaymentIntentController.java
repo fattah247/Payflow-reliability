@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -55,6 +56,14 @@ public class PaymentIntentController {
     public PaymentIntentResponse cancel(@PathVariable UUID paymentIntentId, @Valid @RequestBody CancelPaymentIntentRequest request,
                                         Caller caller) {
         return PaymentIntentResponse.from(paymentIntentService.cancel(paymentIntentId, request.reason(), caller));
+    }
+
+    /** The caller's payments for one merchant reference, newest first (at most 50). Operators also pass merchantId. */
+    @GetMapping
+    public List<PaymentIntentResponse> findByReference(@RequestParam String merchantReference,
+                                                       @RequestParam(required = false) String merchantId, Caller caller) {
+        return paymentIntentService.findByReference(merchantReference, merchantId, caller).stream()
+                .map(PaymentIntentResponse::from).toList();
     }
 
     @GetMapping("/{paymentIntentId}")

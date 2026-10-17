@@ -264,4 +264,27 @@ class ApiContractTest extends IntegrationTest {
                     .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
         }
     }
+
+    @Test
+    void shouldLetAMerchantFindItsOwnPaymentsByReferenceAfterLosingTheKey() throws Exception {
+        postIntent(merchantAKey, "lost-key-1", CREATE_BODY.replace("ORDER-9001", "ORDER-LOST")).andExpect(status().isCreated());
+        clock.advance(java.time.Duration.ofSeconds(1));
+        postIntent(merchantAKey, "fresh-key-2", CREATE_BODY.replace("ORDER-9001", "ORDER-LOST").replace("125000", "130000"))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(as(merchantAKey, get("/api/payment-intents").param("merchantReference", "ORDER-LOST")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].amount").value(130000.0))
+                .andExpect(jsonPath("$[1].amount").value(125000.0));
+        mockMvc.perform(as(merchantBKey, get("/api/payment-intents").param("merchantReference", "ORDER-LOST")
+                        .param("merchantId", MERCHANT_A)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0)); // merchant B searches only its own payments
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/payment-intents").param("merchantReference", "ORDER-LOST")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/payment-intents").param("merchantReference", "ORDER-LOST").param("merchantId", MERCHANT_A)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(2));
+        mockMvc.perform(get("/api/payment-intents").param("merchantReference", "ORDER-LOST")).andExpect(status().isUnauthorized());
+    }
 }

@@ -12,12 +12,14 @@ import id.fatarc.portfolio.payflowreliability.risk.RequiredConfirmation;
 import id.fatarc.portfolio.payflowreliability.risk.RiskService;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.List;
 import java.time.Clock;
 import java.util.UUID;
 
@@ -136,6 +138,24 @@ public class PaymentIntentService {
     public PaymentIntent getRequired(UUID paymentIntentId) {
         return paymentIntentRepository.findById(paymentIntentId)
                 .orElseThrow(() -> notFound(paymentIntentId));
+    }
+
+    /**
+     * A merchant's payments for one of its own references, newest first (at most 50). This is how a shop finds a payment
+     * whose create response never reached it and whose idempotency key it lost. A merchant always searches its own
+     * payments; an operator names the merchant.
+     */
+    @Transactional(readOnly = true)
+    public List<PaymentIntent> findByReference(String merchantReference, String merchantId, Caller caller) {
+        String merchant = caller.isMerchant() ? caller.merchantId() : merchantId;
+        if (merchant == null || merchant.isBlank()) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED, "merchantId is required when an operator looks up a reference.");
+        }
+        if (merchantReference == null || merchantReference.isBlank()) {
+            throw new BusinessException(ErrorCode.VALIDATION_FAILED, "merchantReference is required.");
+        }
+        return paymentIntentRepository.findByMerchantIdAndMerchantReferenceOrderByCreatedAtDesc(merchant, merchantReference,
+                PageRequest.of(0, 50));
     }
 
     /** A merchant asking for another merchant's payment gets the same 404 as for a missing one. */
