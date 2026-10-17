@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -24,4 +25,9 @@ public interface SettlementBatchRepository extends JpaRepository<SettlementBatch
     Optional<UUID> findIdByPayoutReference(@Param("reference") String reference);
 
     List<SettlementBatch> findByPayoutStatusInOrderByCreatedAtAsc(Collection<PayoutStatus> statuses);
+
+    List<SettlementBatch> findByCreatedAtGreaterThanEqualAndCreatedAtLessThanOrderByCreatedAtAsc(Instant from, Instant before);
+
+    List<SettlementBatch> findByMerchantIdAndCreatedAtGreaterThanEqualAndCreatedAtLessThanOrderByCreatedAtAsc(String merchantId,
+                                                                                                         Instant from, Instant before);
 }

@@ -216,12 +216,16 @@ public class ReconciliationService {
                     opened.getId(), detail));
         }
         if (report.settlementDate() != null) {
-            for (SettlementBatch batch : batchRepository.findAll()) {
-                boolean sentThatDay = batch.isBankTracked()
-                        && LocalDate.ofInstant(batch.getCreatedAt(), ZoneId.systemDefault()).equals(report.settlementDate())
-                        && (report.merchantId() == null || report.merchantId().equals(batch.getMerchantId()))
-                        && batch.getBrokenReason() != BrokenReason.PROVIDER_REFUSED;
-                if (!sentThatDay || reported.contains(batch.getId())) {
+            // Only the batches created that day (in the business time zone), and only the report's merchant if it names one.
+            Instant dayStart = report.settlementDate().atStartOfDay(ZoneId.systemDefault()).toInstant();
+            Instant nextDay = report.settlementDate().plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant();
+            List<SettlementBatch> sentThatDay = report.merchantId() == null
+                    ? batchRepository.findByCreatedAtGreaterThanEqualAndCreatedAtLessThanOrderByCreatedAtAsc(dayStart, nextDay)
+                    : batchRepository.findByMerchantIdAndCreatedAtGreaterThanEqualAndCreatedAtLessThanOrderByCreatedAtAsc(
+                            report.merchantId(), dayStart, nextDay);
+            for (SettlementBatch batch : sentThatDay) {
+                boolean expected = batch.isBankTracked() && batch.getBrokenReason() != BrokenReason.PROVIDER_REFUSED;
+                if (!expected || reported.contains(batch.getId())) {
                     continue;
                 }
                 ReconciliationBreak opened = breakService.open(BreakCategory.MISSING_FROM_PROVIDER_REPORT,

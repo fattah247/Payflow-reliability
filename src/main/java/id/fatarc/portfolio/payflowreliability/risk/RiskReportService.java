@@ -228,9 +228,7 @@ public class RiskReportService {
     }
 
     private List<RiskDecision> decisions(String currency, String merchantId) {
-        return decisions.findAll().stream()
-                .filter(d -> d.getCurrency().equals(currency) && (merchantId == null || d.getMerchantId().equals(merchantId)))
-                .toList();
+        return merchantId == null ? decisions.findByCurrency(currency) : decisions.findByMerchantIdAndCurrency(merchantId, currency);
     }
 
     private static double rate(long[] counts, double assumed) {
