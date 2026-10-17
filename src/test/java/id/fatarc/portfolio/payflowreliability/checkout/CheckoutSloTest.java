@@ -76,6 +76,8 @@ class CheckoutSloTest extends IntegrationTest {
     @Test
     void shouldCountAnAbandonedCheckoutAsMoneyLost() throws Exception {
         PaymentIntent intent = startedIntent("ORDER-SLO-5", "125000");
+        // The counter lives as long as the application context, so other tests' abandoned checkouts are in it too.
+        double abandonedBefore = meterRegistry.counter("payflow.checkout.abandoned.amount", "currency", "IDR").count();
 
         mockMvc.perform(json(as(merchantAKey, post("/api/payment-intents/" + intent.getId() + "/cancel")), "{\"reason\": \"ABANDONED\"}"))
                 .andExpect(status().isOk())
@@ -88,7 +90,8 @@ class CheckoutSloTest extends IntegrationTest {
         assertThat(abandoned.count()).as("cancelling twice counts once").isEqualTo(1);
         assertThat(abandoned.amount().get("IDR")).isEqualByComparingTo("125000.00");
         assertThat(abandoned.perMinute().get("IDR")).as("over the 15-minute window").isEqualByComparingTo("8333.33");
-        assertThat(meterRegistry.counter("payflow.checkout.abandoned.amount", "currency", "IDR").count()).isEqualTo(125000.0);
+        assertThat(meterRegistry.counter("payflow.checkout.abandoned.amount", "currency", "IDR").count() - abandonedBefore)
+                .as("counted once").isEqualTo(125000.0);
     }
 
     @Test
