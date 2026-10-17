@@ -174,7 +174,7 @@ class MoneyInvariantPropertyTest extends IntegrationTest {
                 Tuple.of(3, Arbitraries.just((Action) new ProviderReport())),
                 Tuple.of(3, Arbitraries.just((Action) new ThreeWay())),
                 Tuple.of(2, Arbitraries.just((Action) new AssignUnmatched())),
-                Tuple.of(3, Arbitraries.of(true, false).map(on -> (Action) new Slow(on))),
+                Tuple.of(5, Arbitraries.of(true, true, false).map(on -> (Action) new Slow(on))),
                 Tuple.of(2, index.map(p -> (Action) new Abandon(p))),
                 Tuple.of(2, Arbitraries.integers().between(1, 180).map(minutes -> (Action) new Wait(minutes))));
         return action.list().ofMinSize(20).ofMaxSize(60);
