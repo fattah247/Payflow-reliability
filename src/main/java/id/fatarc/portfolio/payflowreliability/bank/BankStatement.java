@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.bank;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import id.fatarc.portfolio.payflowreliability.common.Money;
 import jakarta.persistence.*;
 import org.springframework.data.domain.Persistable;
@@ -73,6 +74,8 @@ public class BankStatement implements Persistable<UUID> {
         this.importedBy = importedBy;
         this.importedAt = now;
     }
+
+    @JsonIgnore
 
     @Override
     public boolean isNew() {

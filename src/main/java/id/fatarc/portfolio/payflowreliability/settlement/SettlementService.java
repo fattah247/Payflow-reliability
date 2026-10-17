@@ -1,5 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import org.springframework.data.domain.Pageable;
+import id.fatarc.portfolio.payflowreliability.common.ListLimit;
 import id.fatarc.portfolio.payflowreliability.audit.AggregateType;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
@@ -179,10 +181,10 @@ public class SettlementService {
 
     /** Newest first; optionally for one merchant. */
     @Transactional(readOnly = true)
-    public List<SettlementBatch> listBatches(String merchantId) {
-        Sort newestFirst = Sort.by(Sort.Direction.DESC, "createdAt");
+    public List<SettlementBatch> listBatches(String merchantId, Integer limit) {
+        Pageable newestFirst = ListLimit.first(limit, Sort.by(Sort.Direction.DESC, "createdAt"));
         return merchantId == null || merchantId.isBlank()
-                ? settlementBatchRepository.findAll(newestFirst)
+                ? settlementBatchRepository.findAll(newestFirst).getContent()
                 : settlementBatchRepository.findByMerchantId(merchantId, newestFirst);
     }
 

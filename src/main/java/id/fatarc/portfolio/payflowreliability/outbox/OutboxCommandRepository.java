@@ -59,6 +59,8 @@ public interface OutboxCommandRepository extends JpaRepository<OutboxCommand, UU
 
     List<OutboxCommand> findByStatusOrderByCreatedAtAsc(CommandStatus status);
 
+    List<OutboxCommand> findByStatusOrderByCreatedAtAsc(CommandStatus status, Pageable page);
+
     List<OutboxCommand> findAllByOrderByCreatedAtDesc(Pageable page);
 
     long countByStatus(CommandStatus status);

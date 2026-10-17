@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import id.fatarc.portfolio.payflowreliability.common.Money;
 import jakarta.persistence.*;
 import org.springframework.data.domain.Persistable;
@@ -166,6 +167,8 @@ public class SettlementBatch implements Persistable<UUID> {
     public boolean isBankTracked() {
         return payoutStatus != PayoutStatus.LEGACY;
     }
+
+    @JsonIgnore
 
     @Override
     public boolean isNew() {

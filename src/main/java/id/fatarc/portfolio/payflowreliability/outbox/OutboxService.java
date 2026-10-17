@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.outbox;
 
+import id.fatarc.portfolio.payflowreliability.common.ListLimit;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
@@ -7,7 +8,6 @@ import id.fatarc.portfolio.payflowreliability.payment.PaymentIntentRepository;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatchRepository;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -118,10 +118,10 @@ public class OutboxService {
     }
 
     @Transactional(readOnly = true)
-    public List<OutboxCommand> list(CommandStatus status) {
+    public List<OutboxCommand> list(CommandStatus status, Integer limit) {
         return status == null
-                ? repository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, 200))
-                : repository.findByStatusOrderByCreatedAtAsc(status);
+                ? repository.findAllByOrderByCreatedAtDesc(ListLimit.first(limit))
+                : repository.findByStatusOrderByCreatedAtAsc(status, ListLimit.first(limit));
     }
 
     @Transactional(readOnly = true)

@@ -18,9 +18,11 @@ public class OutboxController {
         this.outboxWorker = outboxWorker;
     }
 
+    /** Newest first, or oldest first within one status; at most {@code limit} (default 100, at most 1000). */
     @GetMapping
-    public List<OutboxCommand> list(@RequestParam(required = false) CommandStatus status) {
-        return outboxService.list(status);
+    public List<OutboxCommand> list(@RequestParam(required = false) CommandStatus status,
+                                    @RequestParam(required = false) Integer limit) {
+        return outboxService.list(status, limit);
     }
 
     @GetMapping("/{commandId}")

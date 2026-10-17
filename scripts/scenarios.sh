@@ -845,9 +845,9 @@ scenario_returned_payout() {
   category=$(pick 0.category)
   owner=$(pick 0.owner)
   show "break" "$category, owner $owner"
-  as_ops request GET /api/bank/lines ""
+  as_ops request GET "/api/bank/lines?endToEndId=$reference&status=RETURN" ""
   local return_line
-  return_line=$(json "[l['id'] for l in b if l.get('endToEndId') == '$reference' and l['matchStatus'] == 'RETURN'][0]")
+  return_line=$(pick 0.id)
   as_ops request GET "/api/ledger/journals?reference=$return_line" ""
   local journal
   journal=$(json "'; '.join('%s: ' % j['type'] + ', '.join('%s %s %s' % ('debit' if p['amount'] > 0 else 'credit', p['account'], int(abs(p['amount']))) for p in j['postings']) for j in b)")
@@ -924,9 +924,9 @@ PY
   owner=$(json "[x['owner'] for x in b if x['statementId'] == '$copy_id'][0]")
   show "break (owner $owner)" "$conflict"
 
-  as_ops request GET /api/bank/lines ""
+  as_ops request GET "/api/bank/lines?endToEndId=$reference" ""
   local booked
-  booked=$(json "sum(1 for l in b if l.get('endToEndId') == '$reference')")
+  booked=$(size)
   as_ops request GET "/api/ledger/journals?reference=$batch" ""
   local landings
   landings=$(json "sum(1 for j in b if j['type'] == 'PAYOUT_LANDED')")

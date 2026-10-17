@@ -232,4 +232,36 @@ class ApiContractTest extends IntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("NOTHING_TO_SETTLE"));
     }
+
+    @Test
+    void shouldBoundListsFilterBankLinesAndKeepPersistenceDetailsOutOfResponses() throws Exception {
+        paidIntent("ORDER-LIST-1", "3000");
+        paidIntent("ORDER-LIST-2", "2000");
+        var batch = settle(MERCHANT_A);
+        landPayouts();
+        String reference = reload(batch).getPayoutReference();
+
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/lines").param("endToEndId", reference)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].endToEndId").value(reference))
+                .andExpect(jsonPath("$[0].matchStatus").value("MATCHED"));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/lines").param("endToEndId", reference).param("status", "SUSPENSE")))
+                .andExpect(jsonPath("$.length()").value(0));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/statements").param("limit", "1")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/settlements/batches").param("merchantId", MERCHANT_A).param("limit", "1")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].payoutStatus").value("LANDED"))
+                .andExpect(jsonPath("$[0].new").doesNotExist());
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/outbox").param("status", "SUCCEEDED").param("limit", "5")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+
+        for (String limit : new String[]{"0", "1001", "-3"}) {
+            mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/lines").param("limit", limit)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+        }
+    }
 }

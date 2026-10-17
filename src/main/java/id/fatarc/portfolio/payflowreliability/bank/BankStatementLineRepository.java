@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.bank;
 
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 
@@ -17,7 +18,11 @@ public interface BankStatementLineRepository extends JpaRepository<BankStatement
 
     List<BankStatementLine> findByMatchStatusOrderByImportedAtAsc(BankLineStatus status);
 
-    List<BankStatementLine> findAllByOrderByImportedAtDesc();
+    List<BankStatementLine> findAllByOrderByImportedAtDesc(Pageable page);
+
+    List<BankStatementLine> findByMatchStatusOrderByImportedAtAsc(BankLineStatus status, Pageable page);
+
+    List<BankStatementLine> findByEndToEndIdOrderByImportedAtAsc(String endToEndId);
 
     Optional<BankStatementLine> findFirstByEndToEndIdAndCreditDebitAndMatchStatusOrderByImportedAtAsc(String endToEndId,
                                                                                                        String creditDebit,

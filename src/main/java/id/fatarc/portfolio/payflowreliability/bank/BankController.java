@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.bank;
 
+import id.fatarc.portfolio.payflowreliability.common.ListLimit;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -39,10 +40,11 @@ public class BankController {
         return importService.pull(caller.name());
     }
 
+    /** Imported statements, newest first: at most {@code limit} (default 100, at most 1000). */
     @GetMapping("/statements")
     @Transactional(readOnly = true)
-    public List<Map<String, Object>> statements() {
-        return statementRepository.findAllByOrderByImportedAtDesc().stream().map(statement -> Map.<String, Object>of(
+    public List<Map<String, Object>> statements(@RequestParam(required = false) Integer limit) {
+        return statementRepository.findAllByOrderByImportedAtDesc(ListLimit.first(limit)).stream().map(statement -> Map.<String, Object>of(
                 "statementId", statement.getStatementId(),
                 "accountId", statement.getAccountId(),
                 "sequenceNumber", statement.getSequenceNumber(),
@@ -53,9 +55,25 @@ public class BankController {
                 "importedAt", statement.getImportedAt())).toList();
     }
 
+    /**
+     * Imported bank lines: those carrying one payout reference ({@code endToEndId}), those of one statement, or those
+     * with one match status; at most {@code limit} (default 100, at most 1000). Without a filter, newest first.
+     */
     @GetMapping("/lines")
     @Transactional(readOnly = true)
-    public List<BankStatementLine> lines(@RequestParam(required = false) BankLineStatus status) {
-        return status == null ? lineRepository.findAllByOrderByImportedAtDesc() : lineRepository.findByMatchStatusOrderByImportedAtAsc(status);
+    public List<BankStatementLine> lines(@RequestParam(required = false) BankLineStatus status,
+                                         @RequestParam(required = false) String endToEndId,
+                                         @RequestParam(required = false) String statementId,
+                                         @RequestParam(required = false) Integer limit) {
+        int max = ListLimit.of(limit);
+        List<BankStatementLine> candidates = endToEndId != null ? lineRepository.findByEndToEndIdOrderByImportedAtAsc(endToEndId)
+                : statementId != null ? lineRepository.findByStatementIdOrderByValueDateAscAccountServicerRefAsc(statementId)
+                : status != null ? lineRepository.findByMatchStatusOrderByImportedAtAsc(status, ListLimit.first(max))
+                : lineRepository.findAllByOrderByImportedAtDesc(ListLimit.first(max));
+        return candidates.stream()
+                .filter(line -> status == null || line.getMatchStatus() == status)
+                .filter(line -> statementId == null || statementId.equals(line.getStatementId()))
+                .limit(max)
+                .toList();
     }
 }

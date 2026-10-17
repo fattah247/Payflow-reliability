@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import id.fatarc.portfolio.payflowreliability.common.Money;
 import jakarta.persistence.*;
 import org.springframework.data.domain.Persistable;
@@ -86,6 +87,8 @@ public class SettlementBatchItem implements Persistable<UUID> {
         return new SettlementBatchItem(batchId, SettlementItemType.REVERSAL, paymentIntentId, null, null, paymentIntentId,
                 amount.negate(), currency, now);
     }
+
+    @JsonIgnore
 
     @Override
     public boolean isNew() {

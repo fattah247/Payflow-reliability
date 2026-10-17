@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.audit;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import id.fatarc.portfolio.payflowreliability.common.Text;
 import jakarta.persistence.*;
 import org.springframework.data.domain.Persistable;
@@ -105,6 +106,8 @@ public class AuditEvent implements Persistable<UUID> {
         return AuditHash.compute(chainKey, sequenceNumber, previousHash, id, aggregateType, aggregateId, paymentIntentId,
                 eventType, previousState, newState, actor, reason, metadata, requestId, createdAt);
     }
+
+    @JsonIgnore
 
     @Override
     public boolean isNew() {

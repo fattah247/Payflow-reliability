@@ -31,9 +31,11 @@ public class SettlementController {
         return settlementService.createBatch(merchantId, currency, caller);
     }
 
+    /** Newest first; at most {@code limit} (default 100, at most 1000). */
     @GetMapping("/batches")
-    public List<SettlementBatch> listBatches(@RequestParam(required = false) String merchantId) {
-        return settlementService.listBatches(merchantId);
+    public List<SettlementBatch> listBatches(@RequestParam(required = false) String merchantId,
+                                             @RequestParam(required = false) Integer limit) {
+        return settlementService.listBatches(merchantId, limit);
     }
 
     @GetMapping("/batches/{batchId}/items")

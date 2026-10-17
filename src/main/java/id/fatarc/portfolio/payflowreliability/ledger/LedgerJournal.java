@@ -1,5 +1,6 @@
 package id.fatarc.portfolio.payflowreliability.ledger;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import id.fatarc.portfolio.payflowreliability.common.Text;
 import jakarta.persistence.*;
 import org.springframework.data.domain.Persistable;
@@ -52,6 +53,8 @@ public class LedgerJournal implements Persistable<UUID> {
         this.requestId = requestId;
         this.createdAt = createdAt;
     }
+
+    @JsonIgnore
 
     @Override
     public boolean isNew() {
