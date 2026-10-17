@@ -105,8 +105,8 @@ key would be a new payment. Find what happened by the reference you gave the pay
 curl -H "Authorization: Bearer $MERCHANT_KEY" "localhost:8080/api/payment-intents?merchantReference=checkout-1001"
 ```
 
-It returns your payments with that reference, newest first (at most 50; never another merchant's). An empty list
-means the request never created anything, and a new attempt is safe. Store the key before the first attempt and
+It returns your payments with that reference, newest first (paged like every list; never another merchant's). An
+empty list means the request never created anything, and a new attempt is safe. Store the key before the first attempt and
 this is never needed.
 
 ## The same rules apply to us

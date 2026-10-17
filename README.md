@@ -80,6 +80,8 @@ the bank statement, with the evidence at each stage, and shows slowness and devi
 **Operations can see and act**
 - one worklist of everything waiting for a person, most urgent first, with owners, due times that match the alerts,
   the next step, the calls that resolve each item, and a suggested payout for credits nobody could match
+- every list paged with one cursor contract (`Link: rel="next"`), so a page size never hides a row; the worklist pages
+  by due time, in time proportional to the page, not the backlog
 - one view of money at risk (past the SLO, abandoned, held, in breaks by age, awaiting a step-up, blocked today)
 - a case file per payment and an operations summary
 - Prometheus gauges for what needs people, alert rules with a runbook, dead man's switches for the checks
@@ -331,7 +333,7 @@ value-date windows and expiry are tested without sleeping.
 | Ledger and audit | every journal balanced, balances per merchant, invariant violations detected, hash chain tamper detection, append-only triggers (PostgreSQL) |
 | Operations | case file, summary, sweep endpoint, alerting gauges, every alert rule references an exported metric and has a runbook, the worklist (one queue across review cases, proposals and breaks, due order, owners, the suggested payout for an unmatched credit, and calls that are followed to prove they resolve the item) |
 | Migration | a database at the previous version with legacy rows upgrades consistently (both databases) |
-| API contract | status codes, `Location`, `Idempotent-Replayed`, `X-Request-Id`, error codes, currency precision, bounded and filtered lists, no persistence internals in responses, finding a payment by merchant reference after losing its key |
+| API contract | status codes, `Location`, `Idempotent-Replayed`, `X-Request-Id`, error codes, currency precision, bounded and filtered lists, no persistence internals in responses, finding a payment by merchant reference after losing its key, every list walked page by page through its `Link` header without a gap or a repeat |
 
 **The tests were checked by mutation.** Each of these deliberate breakages makes the suite fail: skipping the
 webhook signature check, removing the replay window, letting a proposer approve their own decision, ignoring
@@ -550,7 +552,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 | POST | `/api/payment-intents/{id}/confirm` | M | Body `{method}`: the step-up confirmation the shop verified (`STEP_UP_KEY` or `TAP`, as required); **422** `CONFIRMATION_METHOD_MISMATCH`. Repeating it is a no-op |
 | POST | `/api/payment-intents/{id}/cancel` | M, O | Body `{reason}` (for example `ABANDONED`), only before the customer paid. Repeating it is a no-op |
 | GET | `/api/payment-intents/{id}` | M, O | Another merchant's payment is **404** |
-| GET | `/api/payment-intents?merchantReference=` | M, O | Your payments for one of your references, newest first (at most 50): how to find a payment after losing its idempotency key. Operators also pass `merchantId` |
+| GET | `/api/payment-intents?merchantReference=&limit=&after=` | M, O | Your payments for one of your references, newest first: how to find a payment after losing its idempotency key. Operators also pass `merchantId` |
 | GET | `/api/payment-intents/{id}/case-file` | O | Attention summary, settlement certainty per stage, device-risk decision, provider transactions, events (webhook or poll), provider calls, refunds, settlement items, ledger journals, review cases, audit chain verification, timeline |
 
 ### Provider webhook
@@ -572,7 +574,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| GET | `/api/outbox?status=&limit=` | O | `PENDING`, `SUCCEEDED`, `FAILED`, `NEEDS_REVIEW`, `CANCELLED`, with attempts and last error |
+| GET | `/api/outbox?status=&limit=&after=` | O | `PENDING`, `SUCCEEDED`, `FAILED`, `NEEDS_REVIEW`, `CANCELLED`, with attempts and last error |
 | GET | `/api/outbox/{id}` | O | |
 | POST | `/api/outbox/{id}/retry` | O | Requeue a call with an unknown outcome (safe: same idempotency key) |
 | POST | `/api/outbox/run` | O | Run the worker now |
@@ -582,7 +584,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 | Method | Path | Who | Notes |
 |---|---|---|---|
 | POST | `/api/settlements/batches?merchantId=&currency=` | O | **201** with captures, deductions and net. `currency` only if several are payable (**422** lists them). **409** `NOTHING_TO_SETTLE`, also when the net is not positive (it carries forward) |
-| GET | `/api/settlements/batches?merchantId=&limit=` | O | Newest first |
+| GET | `/api/settlements/batches?merchantId=&limit=&after=` | O | Newest first |
 | GET | `/api/settlements/batches/{batchId}/items` | O | Signed items: `CAPTURE`, `REFUND`, `REVERSAL` |
 | GET | `/api/settlements/backlog` | O | What the next batches would pay, per merchant and currency |
 | GET | `/api/ledger/balances?merchantId=&currency=` | O | Account balances and what is owed to each merchant |
@@ -596,11 +598,11 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 |---|---|---|---|
 | POST | `/api/bank/statements` | O | One camt.053 file (`application/xml`). **200** `IMPORTED` or `ALREADY_IMPORTED`; **409** `CONFLICT` (same id or number, other content; a break is opened); **422** `BANK_STATEMENT_INVALID` |
 | POST | `/api/bank/statements/pull` | O | Download and import every statement the bank has that is not complete here yet (also runs every minute) |
-| GET | `/api/bank/statements?limit=` | O | Imported statements (number, date, balances, entries), newest first |
-| GET | `/api/bank/lines?endToEndId=&statementId=&status=&limit=` | O | Bank lines carrying one payout reference, of one statement, or with one match status (`MATCHED`, `SUSPENSE`, `RETURN`, `CLEARED`) |
+| GET | `/api/bank/statements?limit=&after=` | O | Imported statements (number, date, balances, entries), newest first |
+| GET | `/api/bank/lines?endToEndId=&statementId=&status=&limit=&after=` | O | Bank lines carrying one payout reference, of one statement, or with one match status (`MATCHED`, `SUSPENSE`, `RETURN`, `CLEARED`); oldest first when filtered, newest first otherwise |
 | POST | `/api/reconciliation/three-way/run` | O | Match suspense lines, declare missing credits, reconcile payments (also runs every 5 minutes) |
 | GET | `/api/reconciliation/three-way/batches/{batchId}` | O | One payout seen three ways: ledger, provider, bank lines, every check, its breaks |
-| GET | `/api/reconciliation/breaks?status=&category=&batchId=` | O | Breaks with owner, amount, suspense, age, due time, overdue and allowed actions |
+| GET | `/api/reconciliation/breaks?status=&category=&batchId=&limit=&after=` | O | Breaks with owner, amount, suspense, age, due time, overdue and allowed actions; oldest first with a status (a queue), newest first otherwise |
 | POST | `/api/reconciliation/breaks/{id}/resolve` | O | Body `{action, batchId, note}`: `ASSIGN_TO_BATCH` (an unmatched or late credit; the amount must still match) or `ACKNOWLEDGE` (only breaks that hold no money); **422** `BREAK_ACTION_NOT_APPLICABLE` |
 
 ### Device risk
@@ -617,7 +619,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| GET | `/api/review-cases?status=UNRESOLVED\|OPEN\|AWAITING_APPROVAL\|RESOLVED\|ALL&reason=&paymentIntentId=` | O | Oldest first, with `paymentState`, `allowedActions` and `approvalRequiredFor` |
+| GET | `/api/review-cases?status=UNRESOLVED\|OPEN\|AWAITING_APPROVAL\|RESOLVED\|ALL&reason=&paymentIntentId=&limit=&after=` | O | Oldest first, with `paymentState`, `allowedActions`, `approvalRequiredFor`, `dueAt` and `overdue` |
 | GET | `/api/review-cases/{id}` | O | |
 | POST | `/api/review-cases/{id}/resolve` | O | Body `{note, action}`. **200** applied; **202** `AWAITING_APPROVAL` for `APPROVE_REFUND` and `REQUIRE_REVERSAL`; **422** explains what is allowed and why |
 | POST | `/api/review-cases/{id}/approve` | O | A different operator than the proposer; **403** `FOUR_EYES_REQUIRED` otherwise |
@@ -630,15 +632,21 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 | GET | `/api/audit-events?paymentIntentId=` or `?aggregateType=&aggregateId=` | O | |
 | GET | `/api/audit-events/verify?paymentIntentId=` or `?chainKey=` | O | Recomputes the hash chain; reports the first broken event |
 | GET | `/api/operations/summary` | O | Payments per state, stuck payments, review queue (unresolved, awaiting approval, by reason, oldest), refunds, provider calls, settlement backlog, last ledger check, money at risk |
-| GET | `/api/operations/worklist?owner=&limit=` | O | Everything waiting for a person, most urgent first: owner, money, due time, next step, the calls that resolve it and the evidence; for an unmatched credit, the payout it most likely belongs to ([ADR 029](docs/adr/029-one-worklist-for-people.md)) |
+| GET | `/api/operations/worklist?owner=&limit=&after=` | O | Everything waiting for a person, most urgent first (paged by due time; the summary counts everything): owner, money, due time, next step, the calls that resolve it and the evidence; for an unmatched credit, the payout it most likely belongs to ([ADR 029](docs/adr/029-one-worklist-for-people.md)) |
 | GET | `/api/operations/money-at-risk?merchantId=` | O | Every kind of money at risk as counts and amounts, for everything or one merchant |
 | GET | `/api/operations/invariants` | O | Every money rule checked now, with the evidence of each violation |
 | POST | `/api/operations/sweeps/payment-status?olderThanSeconds=` | O | Ask the provider about waiting payments now |
 | GET | `/actuator/prometheus`, `/actuator/metrics` | O | `/actuator/health` (and liveness/readiness) is public |
 
 Every operator `POST` accepts an optional `Idempotency-Key`: the first response is stored for 24 hours and
-replayed with `Idempotent-Replayed: true`. The bank, settlement batch, outbox and worklist lists return at most `limit`
-rows (default 100, at most 1000; anything else is **400** `VALIDATION_FAILED`). The full key contract is in [docs/idempotency-keys.md](docs/idempotency-keys.md).
+replayed with `Idempotent-Replayed: true`. The full key contract is in [docs/idempotency-keys.md](docs/idempotency-keys.md).
+
+**Every list is paged the same way.** A page holds at most `limit` rows (default 100, at most 1000; anything else is
+**400** `VALIDATION_FAILED`). When more rows exist, the response carries `Link: <same request, after=...>; rel="next"`
+and `X-Next-After: <cursor>`; the last page carries neither. The cursor is opaque and stands for the last row shown
+(its time and id), so rows inserted while you page never shift what comes next, and walking the pages returns every
+matching row exactly once. Bodies stay plain JSON arrays (the worklist keeps its object and adds `next`). A cursor
+that was not issued by the list is **400** `VALIDATION_FAILED`.
 
 ### Simulations and simulators (local only)
 
