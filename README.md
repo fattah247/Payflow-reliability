@@ -78,6 +78,8 @@ the bank statement, with the evidence at each stage, and shows slowness and devi
 - a seeded chaos run plays the same kinds of faults against the packaged app in CI
 
 **Operations can see and act**
+- one worklist of everything waiting for a person, most urgent first, with owners, due times that match the alerts,
+  the next step, the calls that resolve each item, and a suggested payout for credits nobody could match
 - one view of money at risk (past the SLO, abandoned, held, in breaks by age, awaiting a step-up, blocked today)
 - a case file per payment and an operations summary
 - Prometheus gauges for what needs people, alert rules with a runbook, dead man's switches for the checks
@@ -305,7 +307,7 @@ The same suite runs against PostgreSQL by pointing Spring at it (CI does both):
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/payflow_reliability SPRING_DATASOURCE_USERNAME=payflow_reliability SPRING_DATASOURCE_PASSWORD=payflow_reliability ./mvnw test
 ```
 
-277 tests in 41 classes, one of them a property-based test that runs 50 random histories of faults. They are
+285 tests in 42 classes, one of them a property-based test that runs 50 random histories of faults. They are
 **not** wrapped in a test-managed transaction: every service call commits or rolls back exactly as in production,
 and the provider and bank simulators and the webhooks run over the server's real HTTP port. Background jobs are
 off in tests and each test runs them explicitly against a movable clock, so retries, leases, replay windows,
@@ -327,9 +329,9 @@ value-date windows and expiry are tested without sleeping.
 | Money rules | eleven rules checked after 50 random histories of faults per run, with coverage checks on what the histories reached; each rule shown catching a planted violation; a seeded chaos run against the live API |
 | Review | allowed actions, release / fail / reverse, two-person approval, proposals rejected, two operators racing |
 | Ledger and audit | every journal balanced, balances per merchant, invariant violations detected, hash chain tamper detection, append-only triggers (PostgreSQL) |
-| Operations | case file, summary, sweep endpoint, alerting gauges, every alert rule references an exported metric and has a runbook |
+| Operations | case file, summary, sweep endpoint, alerting gauges, every alert rule references an exported metric and has a runbook, the worklist (one queue across review cases, proposals and breaks, due order, owners, the suggested payout for an unmatched credit, and calls that are followed to prove they resolve the item) |
 | Migration | a database at the previous version with legacy rows upgrades consistently (both databases) |
-| API contract | status codes, `Location`, `Idempotent-Replayed`, `X-Request-Id`, error codes, currency precision |
+| API contract | status codes, `Location`, `Idempotent-Replayed`, `X-Request-Id`, error codes, currency precision, bounded and filtered lists, no persistence internals in responses, finding a payment by merchant reference after losing its key |
 
 **The tests were checked by mutation.** Each of these deliberate breakages makes the suite fail: skipping the
 webhook signature check, removing the replay window, letting a proposer approve their own decision, ignoring
@@ -416,7 +418,7 @@ PostgreSQL), so every one can be reproduced.
 | Net settlement | Four racing runs, one batch; captures minus refunds; a held payment waits | `./scripts/scenarios.sh settlement` |
 | Reconciliation | A verdict per row, a payout missing from the report; the clean match reconciles only once the bank confirms | `./scripts/scenarios.sh reconciliation` |
 | Audit trail | Timeline with actor and request id per step; the hash chain verifies | `./scripts/scenarios.sh audit-trail` |
-| Tests | 277 tests on H2 and on PostgreSQL | `./mvnw test` |
+| Tests | 285 tests on H2 and on PostgreSQL | `./mvnw test` |
 | Provider timeout | The provider refunds, then times out; the customer is refunded exactly once | `./scripts/scenarios.sh provider-outage` |
 | Lost webhook | The sweeper recovers the capture from the provider | `./scripts/scenarios.sh lost-webhook` |
 | Two operators | Chargeback after payout: proposal, self-approval refused, approval, reversal booked | `./scripts/scenarios.sh four-eyes` |
@@ -548,6 +550,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 | POST | `/api/payment-intents/{id}/confirm` | M | Body `{method}`: the step-up confirmation the shop verified (`STEP_UP_KEY` or `TAP`, as required); **422** `CONFIRMATION_METHOD_MISMATCH`. Repeating it is a no-op |
 | POST | `/api/payment-intents/{id}/cancel` | M, O | Body `{reason}` (for example `ABANDONED`), only before the customer paid. Repeating it is a no-op |
 | GET | `/api/payment-intents/{id}` | M, O | Another merchant's payment is **404** |
+| GET | `/api/payment-intents?merchantReference=` | M, O | Your payments for one of your references, newest first (at most 50): how to find a payment after losing its idempotency key. Operators also pass `merchantId` |
 | GET | `/api/payment-intents/{id}/case-file` | O | Attention summary, settlement certainty per stage, device-risk decision, provider transactions, events (webhook or poll), provider calls, refunds, settlement items, ledger journals, review cases, audit chain verification, timeline |
 
 ### Provider webhook
@@ -569,7 +572,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 
 | Method | Path | Who | Notes |
 |---|---|---|---|
-| GET | `/api/outbox?status=` | O | `PENDING`, `SUCCEEDED`, `FAILED`, `NEEDS_REVIEW`, `CANCELLED`, with attempts and last error |
+| GET | `/api/outbox?status=&limit=` | O | `PENDING`, `SUCCEEDED`, `FAILED`, `NEEDS_REVIEW`, `CANCELLED`, with attempts and last error |
 | GET | `/api/outbox/{id}` | O | |
 | POST | `/api/outbox/{id}/retry` | O | Requeue a call with an unknown outcome (safe: same idempotency key) |
 | POST | `/api/outbox/run` | O | Run the worker now |
@@ -579,7 +582,7 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 | Method | Path | Who | Notes |
 |---|---|---|---|
 | POST | `/api/settlements/batches?merchantId=&currency=` | O | **201** with captures, deductions and net. `currency` only if several are payable (**422** lists them). **409** `NOTHING_TO_SETTLE`, also when the net is not positive (it carries forward) |
-| GET | `/api/settlements/batches?merchantId=` | O | Newest first |
+| GET | `/api/settlements/batches?merchantId=&limit=` | O | Newest first |
 | GET | `/api/settlements/batches/{batchId}/items` | O | Signed items: `CAPTURE`, `REFUND`, `REVERSAL` |
 | GET | `/api/settlements/backlog` | O | What the next batches would pay, per merchant and currency |
 | GET | `/api/ledger/balances?merchantId=&currency=` | O | Account balances and what is owed to each merchant |
@@ -593,7 +596,8 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 |---|---|---|---|
 | POST | `/api/bank/statements` | O | One camt.053 file (`application/xml`). **200** `IMPORTED` or `ALREADY_IMPORTED`; **409** `CONFLICT` (same id or number, other content; a break is opened); **422** `BANK_STATEMENT_INVALID` |
 | POST | `/api/bank/statements/pull` | O | Download and import every statement the bank has that is not complete here yet (also runs every minute) |
-| GET | `/api/bank/statements`, `/api/bank/lines?status=` | O | Imported statements (number, date, balances, entries); lines with their match status (`MATCHED`, `SUSPENSE`, `RETURN`, `CLEARED`) |
+| GET | `/api/bank/statements?limit=` | O | Imported statements (number, date, balances, entries), newest first |
+| GET | `/api/bank/lines?endToEndId=&statementId=&status=&limit=` | O | Bank lines carrying one payout reference, of one statement, or with one match status (`MATCHED`, `SUSPENSE`, `RETURN`, `CLEARED`) |
 | POST | `/api/reconciliation/three-way/run` | O | Match suspense lines, declare missing credits, reconcile payments (also runs every 5 minutes) |
 | GET | `/api/reconciliation/three-way/batches/{batchId}` | O | One payout seen three ways: ledger, provider, bank lines, every check, its breaks |
 | GET | `/api/reconciliation/breaks?status=&category=&batchId=` | O | Breaks with owner, amount, suspense, age, due time, overdue and allowed actions |
@@ -626,13 +630,15 @@ check their own keys). **M** = merchant key (own payments only), **O** = operato
 | GET | `/api/audit-events?paymentIntentId=` or `?aggregateType=&aggregateId=` | O | |
 | GET | `/api/audit-events/verify?paymentIntentId=` or `?chainKey=` | O | Recomputes the hash chain; reports the first broken event |
 | GET | `/api/operations/summary` | O | Payments per state, stuck payments, review queue (unresolved, awaiting approval, by reason, oldest), refunds, provider calls, settlement backlog, last ledger check, money at risk |
+| GET | `/api/operations/worklist?owner=&limit=` | O | Everything waiting for a person, most urgent first: owner, money, due time, next step, the calls that resolve it and the evidence; for an unmatched credit, the payout it most likely belongs to ([ADR 029](docs/adr/029-one-worklist-for-people.md)) |
 | GET | `/api/operations/money-at-risk?merchantId=` | O | Every kind of money at risk as counts and amounts, for everything or one merchant |
 | GET | `/api/operations/invariants` | O | Every money rule checked now, with the evidence of each violation |
 | POST | `/api/operations/sweeps/payment-status?olderThanSeconds=` | O | Ask the provider about waiting payments now |
 | GET | `/actuator/prometheus`, `/actuator/metrics` | O | `/actuator/health` (and liveness/readiness) is public |
 
 Every operator `POST` accepts an optional `Idempotency-Key`: the first response is stored for 24 hours and
-replayed with `Idempotent-Replayed: true`. The full key contract is in [docs/idempotency-keys.md](docs/idempotency-keys.md).
+replayed with `Idempotent-Replayed: true`. The bank, settlement batch, outbox and worklist lists return at most `limit`
+rows (default 100, at most 1000; anything else is **400** `VALIDATION_FAILED`). The full key contract is in [docs/idempotency-keys.md](docs/idempotency-keys.md).
 
 ### Simulations and simulators (local only)
 
@@ -723,6 +729,7 @@ show one refund.
 | Money rules as production code, tested with random histories | incidents are combinations nobody wrote a test for | [026](docs/adr/026-property-based-money-invariants.md) |
 | Slowness measured as money | "slow but up" passes every health check while customers leave | [027](docs/adr/027-slowness-as-money.md) |
 | Device risk decided on the server, measured as money | the device can lie; the server knows the amount; every threshold has a price | [028](docs/adr/028-device-risk-as-money.md) |
+| One worklist for people | one call answers "what needs me now, and how do I resolve it?", with due times that match the alerts | [029](docs/adr/029-one-worklist-for-people.md) |
 
 ---
 

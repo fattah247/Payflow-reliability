@@ -180,6 +180,16 @@ decisions) and checks every rule, and it also fails if the histories did not rea
 Nine deliberate breakages of the new protections were each caught, every one by the property test on its own. The
 same kinds of faults run live in CI as a seeded chaos scenario against the packaged app.
 
+## How does an operator know what to do next?
+
+One call: `GET /api/operations/worklist`. Review cases, proposals waiting for a second operator and reconciliation
+breaks used to live in separate queues with different shapes, and only breaks had deadlines. The worklist puts them in
+one list, most urgent first, with due times taken from the alerts that would page if the item waited longer, so the
+list and the pager agree. Each item names the owner, the money, the next step and the exact calls that resolve it; a
+test follows those calls to prove they work. For a credit nobody could match, it names the payout expecting exactly
+that amount, but it does not assign it: matching by amount alone is the mistake the bank leg exists to prevent, so a
+person confirms with the bank and the server still checks the amount. ([ADR 029](adr/029-one-worklist-for-people.md))
+
 ## What would you add for production?
 
 An identity provider instead of static operator keys, a gateway with rate limiting, chain-head anchoring
