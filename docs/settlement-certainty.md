@@ -384,8 +384,14 @@ The `chaos` scenario does the same live: `POST /api/simulations/chaos-runs` play
 steps) through the public APIs of the shop, the provider and the bank, lets everything settle, and returns what
 happened and every rule. On a fresh database it played, among others, 37 checkouts and 5 with device evidence,
 22 payments, 14 refunds (3 with the provider committing then timing out, 5 while it was down), 12 settlement runs
-(7 of them racing), 4 chargebacks, 9 bank faults, a slow period and 11 duplicated and 4 lost webhooks. It ended
-with 3 payouts (1 landed, 1 credit missing, 1 returned), 3 open breaks each with an owner, and all 11 rules holding.
+(7 of them racing), 4 chargebacks, 9 bank faults, a slow period and 11 duplicated and 4 lost webhooks. The run in
+the screenshot ended with 4 payouts (2 landed, 1 credit missing, 1 returned), 3 open breaks each with an owner, and
+all 12 rules holding.
+
+The seed fixes the actions and the faults, not how they interleave with the running app's own background jobs
+(webhook delivery, provider calls, statement pulls). So the ending can differ between runs by a payout or a break:
+three runs from the same seed ended with 3, 4 and 4 payouts. The rules held in every one, which is the point; the
+property-based test, where the jobs run only when the history says so, is the reproducible version.
 
 ![Chaos](screenshots/23-chaos-money-rules.png)
 
@@ -407,7 +413,8 @@ packaged app on PostgreSQL.
 | `statement-reimport` | twice by hand, re-sent, re-issued | 1 bank line, 1 landing journal; the re-issued copy opens a break |
 | `slow-but-up` | slowness in money, health UP | 16 abandoned (4,369,000), 24 past SLO (7,073,000), 0 duplicates |
 | `device-risk` | step-up, block, and the price of a threshold | precision 0.400, recall 0.933, fraud loss 3,585,000, friction 7,363,000 |
-| `chaos` | seeded faults, live | 150 steps, 11 of 11 rules hold |
+| `chaos` | seeded faults, live | 150 steps, 12 of 12 rules hold (the ending can vary, see 5.4) |
+| `merchant-webhooks` | the shop is told once and in order through an outage and a secret rotation | 5 events delivered, 1 retried, its late copy ignored as stale, a forgery refused |
 
 Dates and statement numbers depend on how far the simulated bank's calendar has moved, so they differ when a
 scenario runs on its own; amounts and counts do not.

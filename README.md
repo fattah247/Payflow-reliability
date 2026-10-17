@@ -317,7 +317,7 @@ The same suite runs against PostgreSQL by pointing Spring at it (CI does both):
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/payflow_reliability SPRING_DATASOURCE_USERNAME=payflow_reliability SPRING_DATASOURCE_PASSWORD=payflow_reliability ./mvnw test
 ```
 
-285 tests in 42 classes, one of them a property-based test that runs 50 random histories of faults. They are
+326 tests in 45 classes, one of them a property-based test that runs 50 random histories of faults. They are
 **not** wrapped in a test-managed transaction: every service call commits or rolls back exactly as in production,
 and the provider and bank simulators and the webhooks run over the server's real HTTP port. Background jobs are
 off in tests and each test runs them explicitly against a movable clock, so retries, leases, replay windows,
@@ -336,7 +336,7 @@ value-date windows and expiry are tested without sleeping.
 | Reconciliation | per-row verdicts incl. refunded amounts, payouts missing from the report, merchant-scoped reports, safe re-import, nothing RECONCILED without a landed payout, breaks with owners, due times and the actions allowed |
 | Slowness | confirmations counted against the SLO, money past the SLO, abandoned checkouts measured exactly as the seeded customers behaved, zero duplicate charges with per-checkout keys and every one counted with per-attempt keys, alert rules unit-tested with `promtool` |
 | Device risk | the app's decisions reproduced for all 256 signal combinations, step-up hold, confirmation method, expiry, block never started, retries keep the first decision, rogue captures to review, fraud stopped, loss, friction, precision and recall equal to the ground truth, the threshold sweep's trade-off |
-| Merchant webhooks | events written only with their change (a rolled-back change has none), per-payment sequence, deliveries over real HTTP to a simulated shop that verifies signatures, deduplicates and ignores stale events; retries for errors, redirects and slow answers; giving up and redelivering; secret rotation with overlap; catch-up paging; isolation between shops; SSRF refusals for 26 kinds of address |
+| Merchant webhooks | events written only with their change (a rolled-back change has none), per-payment sequence, deliveries over real HTTP to a simulated shop that verifies signatures, deduplicates and ignores stale events; retries for errors, redirects and slow answers; giving up and redelivering; secret rotation with overlap; catch-up paging; isolation between shops; SSRF refusals for 23 kinds of URL (private, loopback, link-local and mapped addresses, names that resolve to them, plain http, credentials) |
 | Money rules | twelve rules checked after 50 random histories of faults per run, with coverage checks on what the histories reached; each rule shown catching a planted violation; a seeded chaos run against the live API |
 | Review | allowed actions, release / fail / reverse, two-person approval, proposals rejected, two operators racing |
 | Ledger and audit | every journal balanced, balances per merchant, invariant violations detected, hash chain tamper detection, append-only triggers (PostgreSQL) |
@@ -429,7 +429,7 @@ PostgreSQL), so every one can be reproduced.
 | Net settlement | Four racing runs, one batch; captures minus refunds; a held payment waits | `./scripts/scenarios.sh settlement` |
 | Reconciliation | A verdict per row, a payout missing from the report; the clean match reconciles only once the bank confirms | `./scripts/scenarios.sh reconciliation` |
 | Audit trail | Timeline with actor and request id per step; the hash chain verifies | `./scripts/scenarios.sh audit-trail` |
-| Tests | 285 tests on H2 and on PostgreSQL | `./mvnw test` |
+| Tests | 326 tests on H2 and on PostgreSQL | `./mvnw test` |
 | Provider timeout | The provider refunds, then times out; the customer is refunded exactly once | `./scripts/scenarios.sh provider-outage` |
 | Lost webhook | The sweeper recovers the capture from the provider | `./scripts/scenarios.sh lost-webhook` |
 | Two operators | Chargeback after payout: proposal, self-approval refused, approval, reversal booked | `./scripts/scenarios.sh four-eyes` |
@@ -442,7 +442,8 @@ PostgreSQL), so every one can be reproduced.
 | Statement re-import | Twice by hand, re-sent, re-issued: one bank line, one landing | `./scripts/scenarios.sh statement-reimport` |
 | Slow but up | 4,369,000 IDR abandoned and 7,073,000 past the SLO while health says UP; no duplicate charges | `./scripts/scenarios.sh slow-but-up` |
 | Device risk | Block, step-up, and what each step-up threshold costs in fraud and friction | `./scripts/scenarios.sh device-risk` |
-| Chaos | 150 seeded faults against the live app; all 11 money rules hold | `./scripts/scenarios.sh chaos` |
+| Chaos | 150 seeded faults against the live app; all 12 money rules hold | `./scripts/scenarios.sh chaos` |
+| Merchant webhooks | A payment and a refund told to a shop; the shop down for one delivery, the late copy ignored as stale; a secret rotation; a forged delivery refused | `./scripts/scenarios.sh merchant-webhooks` |
 
 ### Repository overview
 
@@ -535,6 +536,10 @@ PostgreSQL), so every one can be reproduced.
 ### Chaos against the running app
 
 ![Chaos](docs/screenshots/23-chaos-money-rules.png)
+
+### Telling the shop
+
+![Merchant webhooks](docs/screenshots/24-merchant-webhooks.png)
 
 ---
 
