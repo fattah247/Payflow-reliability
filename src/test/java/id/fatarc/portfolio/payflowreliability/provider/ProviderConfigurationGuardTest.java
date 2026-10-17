@@ -37,4 +37,17 @@ class ProviderConfigurationGuardTest {
         assertThat(ProviderConfigurationGuard.bankProblems("https://bank.example/statements", "bank_local_statement_key", false))
                 .singleElement().asString().contains("local demo key");
     }
+
+    @Test
+    void shouldRefuseWebhooksToPrivateAddressesAndTheMerchantSimulatorNextToARealProvider() {
+        ProviderProperties local = provider("", "sim_local_provider_key", "whsec_local_payflow");
+        ProviderProperties real = provider("https://api.psp.example", "live-key", "whsec_live");
+
+        assertThat(ProviderConfigurationGuard.merchantWebhookProblems(local, true, true)).isEmpty();
+        assertThat(ProviderConfigurationGuard.merchantWebhookProblems(real, false, false)).isEmpty();
+        assertThat(ProviderConfigurationGuard.merchantWebhookProblems(real, true, false))
+                .singleElement().asString().contains("allow-private-addresses=false");
+        assertThat(ProviderConfigurationGuard.merchantWebhookProblems(real, false, true))
+                .singleElement().asString().contains("merchant simulator must not run");
+    }
 }

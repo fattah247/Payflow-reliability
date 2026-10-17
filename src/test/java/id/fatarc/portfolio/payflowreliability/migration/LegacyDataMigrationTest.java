@@ -164,7 +164,7 @@ class LegacyDataMigrationTest {
 
         var result = flyway("latest").migrate();
         assertThat(result.success).isTrue();
-        assertThat(result.targetSchemaVersion).isEqualTo("12");
+        assertThat(result.targetSchemaVersion).isEqualTo("13");
 
         assertThat(jdbc.queryForObject("select state from payment_intents where id = ?", String.class, refundRequested))
                 .as("REFUND_REQUESTED is no longer a payment state; the refund itself stays in flight").isEqualTo("SUCCESS");

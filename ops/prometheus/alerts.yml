@@ -195,3 +195,26 @@ groups:
         annotations:
           summary: "Operational gauges have not refreshed for 5 minutes (database or scheduler problem)"
           runbook: docs/runbook.md#metrics-stale
+
+  # Shops' notifications (ADR 030). A shop that is not told acts on stale state: ships an unpaid order, or never ships a
+  # paid one. One shop's endpoint being down is the shop's problem and only delays its own events; these alerts are
+  # tickets so someone tells the shop and redelivers, not pages.
+  - name: payflow-merchants
+    rules:
+      - alert: PayflowMerchantWebhooksFailing
+        expr: payflow_merchant_events_failed > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} merchant event(s) were given up on after every delivery attempt"
+          runbook: docs/runbook.md#merchant-webhooks-failing
+
+      - alert: PayflowMerchantNotificationsDelayed
+        expr: payflow_merchant_events_oldest_pending_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A merchant event has waited over an hour to be delivered"
+          runbook: docs/runbook.md#merchant-notifications-delayed

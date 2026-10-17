@@ -4,6 +4,7 @@ import id.fatarc.portfolio.payflowreliability.bank.BankStatementImportService;
 import id.fatarc.portfolio.payflowreliability.banksim.BankSimulator;
 import id.fatarc.portfolio.payflowreliability.idempotency.IdempotencyService;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerInvariantService;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantWebhookDispatcher;
 import id.fatarc.portfolio.payflowreliability.operations.OperationalMetrics;
 import id.fatarc.portfolio.payflowreliability.outbox.OutboxWorker;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentStatusSweeper;
@@ -37,11 +38,13 @@ public class ScheduledJobs {
     private final ObjectProvider<BankSimulator> bankSim;
     private final BankStatementImportService statements;
     private final ThreeWayReconciliationService threeWay;
+    private final MerchantWebhookDispatcher merchantWebhooks;
 
     public ScheduledJobs(OutboxWorker outboxWorker, ObjectProvider<SimWebhookDispatcher> simDispatcher,
                          PaymentStatusSweeper sweeper, LedgerInvariantService ledgerInvariants,
                          IdempotencyService idempotency, OperationalMetrics metrics, ObjectProvider<BankSimulator> bankSim,
-                         BankStatementImportService statements, ThreeWayReconciliationService threeWay) {
+                         BankStatementImportService statements, ThreeWayReconciliationService threeWay,
+                         MerchantWebhookDispatcher merchantWebhooks) {
         this.outboxWorker = outboxWorker;
         this.simDispatcher = simDispatcher;
         this.sweeper = sweeper;
@@ -51,6 +54,7 @@ public class ScheduledJobs {
         this.bankSim = bankSim;
         this.statements = statements;
         this.threeWay = threeWay;
+        this.merchantWebhooks = merchantWebhooks;
     }
 
     @Scheduled(fixedDelayString = "${payflow.outbox.poll-interval:1s}")
@@ -61,6 +65,12 @@ public class ScheduledJobs {
     @Scheduled(fixedDelayString = "${payflow.provider-sim.dispatch-interval:1s}")
     void dispatchSimulatedWebhooks() {
         simDispatcher.ifAvailable(SimWebhookDispatcher::runOnce);
+    }
+
+    /** Tells shops what changed: signed webhooks, retried with backoff. */
+    @Scheduled(fixedDelayString = "${payflow.merchant-webhooks.poll-interval:1s}")
+    void deliverMerchantWebhooks() {
+        merchantWebhooks.runOnce();
     }
 
     @Scheduled(fixedDelayString = "${payflow.sweeper.interval:5m}", initialDelayString = "${payflow.sweeper.initial-delay:1m}")

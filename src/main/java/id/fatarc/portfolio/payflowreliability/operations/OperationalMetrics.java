@@ -2,6 +2,8 @@ package id.fatarc.portfolio.payflowreliability.operations;
 
 import id.fatarc.portfolio.payflowreliability.bank.BankStatementImportService;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerInvariantService;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantEvent;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantEventRepository;
 import id.fatarc.portfolio.payflowreliability.reconciliation.ThreeWayReconciliationService;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus;
 import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.ReconciliationBreak;
@@ -55,6 +57,7 @@ public class OperationalMetrics {
     private final ThreeWayReconciliationService threeWayService;
     private final BankStatementImportService statementImportService;
     private final MoneyAtRiskService moneyAtRiskService;
+    private final MerchantEventRepository merchantEventRepository;
     private final ObjectProvider<HealthEndpoint> healthEndpoint;
     private final MultiGauge moneyAtRiskAmount;
     private final TransactionTemplate transactions;
@@ -73,6 +76,7 @@ public class OperationalMetrics {
                               ThreeWayReconciliationService threeWayService,
                               BankStatementImportService statementImportService,
                               MoneyAtRiskService moneyAtRiskService,
+                              MerchantEventRepository merchantEventRepository,
                               ObjectProvider<HealthEndpoint> healthEndpoint,
                               PlatformTransactionManager transactionManager,
                               Clock clock,
@@ -86,6 +90,7 @@ public class OperationalMetrics {
         this.threeWayService = threeWayService;
         this.statementImportService = statementImportService;
         this.moneyAtRiskService = moneyAtRiskService;
+        this.merchantEventRepository = merchantEventRepository;
         this.healthEndpoint = healthEndpoint;
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setReadOnly(true);
@@ -134,6 +139,13 @@ public class OperationalMetrics {
         }
         this.moneyAtRiskAmount = MultiGauge.builder("payflow.money.at.risk.amount")
                 .description("Money at risk, by kind and currency").register(registry);
+        // Shops' notifications (ADR 030): a shop that is not told acts on stale state (ships unpaid orders, or none).
+        gauge(registry, "payflow.merchant.events.pending", "Merchant events waiting to be delivered or retried", null,
+                s -> s.merchantEventsPending);
+        gauge(registry, "payflow.merchant.events.failed", "Merchant events every delivery attempt failed for", null,
+                s -> s.merchantEventsFailed);
+        gauge(registry, "payflow.merchant.events.oldest.pending.age", "Age of the oldest merchant event not yet delivered",
+                "seconds", s -> s.oldestMerchantEventAgeSeconds);
         gauge(registry, "payflow.health.up", "1 when the application's health checks report UP", null, s -> s.healthUp);
     }
 
@@ -163,6 +175,8 @@ public class OperationalMetrics {
                             Tags.of("kind", item.kind().name().toLowerCase(Locale.ROOT), "currency", currency), amount.doubleValue())));
                 }
                 moneyAtRiskAmount.register(amountRows, true);
+                double oldestMerchantEvent = merchantEventRepository.oldestPending()
+                        .map(created -> (double) Duration.between(created, now).toSeconds()).orElse(0.0);
                 boolean up = healthEndpoint.getIfAvailable() != null
                         && Status.UP.equals(healthEndpoint.getObject().health().getStatus());
                 return new Snapshot(now, unresolved,
@@ -182,6 +196,9 @@ public class OperationalMetrics {
                         Duration.between(lastThreeWay, now).toSeconds(),
                         Duration.between(lastStatement, now).toSeconds(),
                         atRiskCount,
+                        merchantEventRepository.countByStatus(MerchantEvent.Status.PENDING),
+                        merchantEventRepository.countByStatus(MerchantEvent.Status.FAILED),
+                        oldestMerchantEvent,
                         up ? 1 : 0);
             });
             snapshot.set(fresh);
@@ -206,9 +223,10 @@ public class OperationalMetrics {
                             double ledgerCheckAgeSeconds, double openBreaks, double overdueBreaks,
                             double oldestBreakAgeSeconds, double brokenPayouts, double reconciliationCheckAgeSeconds,
                             double statementImportAgeSeconds, Map<MoneyAtRiskService.Kind, Long> atRiskCount,
+                            double merchantEventsPending, double merchantEventsFailed, double oldestMerchantEventAgeSeconds,
                             double healthUp) {
         static Snapshot empty(Instant now) {
-            return new Snapshot(now, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(), 0);
+            return new Snapshot(now, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(), 0, 0, 0, 0);
         }
     }
 }

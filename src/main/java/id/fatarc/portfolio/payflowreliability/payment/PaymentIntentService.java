@@ -14,6 +14,7 @@ import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentReq
 import id.fatarc.portfolio.payflowreliability.risk.RequiredConfirmation;
 import id.fatarc.portfolio.payflowreliability.risk.RiskService;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
@@ -35,6 +36,7 @@ public class PaymentIntentService {
     private final RiskService riskService;
     private final Clock clock;
     private final TransactionTemplate transactionTemplate;
+    private final ApplicationEventPublisher events;
 
     public PaymentIntentService(PaymentIntentRepository paymentIntentRepository,
                                 MerchantService merchantService,
@@ -42,7 +44,8 @@ public class PaymentIntentService {
                                 CheckoutMetrics checkoutMetrics,
                                 RiskService riskService,
                                 Clock clock,
-                                PlatformTransactionManager transactionManager) {
+                                PlatformTransactionManager transactionManager,
+                                ApplicationEventPublisher events) {
         this.paymentIntentRepository = paymentIntentRepository;
         this.merchantService = merchantService;
         this.auditService = auditService;
@@ -50,6 +53,7 @@ public class PaymentIntentService {
         this.riskService = riskService;
         this.clock = clock;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.events = events;
     }
 
     /**
@@ -207,6 +211,7 @@ public class PaymentIntentService {
                             "PAYMENT_INTENT_CREATED", caller.name(),
                             "Payment intent created for merchant reference " + request.merchantReference(),
                             "idempotencyKey=" + idempotencyKey);
+                    events.publishEvent(new PaymentCreated(created.getId()));
                     // Decided once, on the first attempt: a retry is answered with this decision, whatever it carries.
                     riskService.decide(created, request.riskEvidence(), caller.name());
                     return new PaymentIntentCreation(created, false);

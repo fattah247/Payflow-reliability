@@ -31,7 +31,8 @@ import java.util.regex.Pattern;
  * A key names one operation; using it for a different method, path, query or body is refused (422).
  *
  * <p>Not applied to payment and refund creation, whose keys are part of the stored records and
- * are required, nor to merchant onboarding, whose responses contain API keys that must not be stored.
+ * are required, nor to merchant onboarding and webhook endpoints, whose responses contain API keys and
+ * signing secrets that must not be stored.
  */
 public class IdempotencyFilter extends OncePerRequestFilter {
     public static final String HEADER = "Idempotency-Key";
@@ -40,7 +41,8 @@ public class IdempotencyFilter extends OncePerRequestFilter {
     private static final List<Pattern> EXCLUDED = List.of(
             Pattern.compile("/api/payment-intents"),
             Pattern.compile("/api/refunds/payment-intents/[^/]+"),
-            Pattern.compile("/api/merchants(/.*)?"));
+            Pattern.compile("/api/merchants(/.*)?"),
+            Pattern.compile("/api/webhook-endpoint(/.*)?"));
 
     private final IdempotencyService service;
     private final ApiErrorWriter errorWriter;

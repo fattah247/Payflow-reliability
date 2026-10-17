@@ -8,6 +8,9 @@ import id.fatarc.portfolio.payflowreliability.audit.AuditEventRepository;
 import id.fatarc.portfolio.payflowreliability.bank.BankStatementImportService;
 import id.fatarc.portfolio.payflowreliability.bank.StatementImportResult;
 import id.fatarc.portfolio.payflowreliability.banksim.BankFaults;
+import id.fatarc.portfolio.payflowreliability.merchantsim.MerchantSimulator;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantEventRepository;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantWebhookDispatcher;
 import id.fatarc.portfolio.payflowreliability.banksim.BankSimulator;
 import id.fatarc.portfolio.payflowreliability.common.WebhookSignatures;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerInvariantService;
@@ -99,8 +102,8 @@ public abstract class IntegrationTest {
             "bank_statement_lines", "bank_statements", "bank_accounts", "sim_payout_items", "sim_payouts", "bank_sim_entries",
             "bank_sim_statements", "bank_sim_accounts", "settlement_batch_items", "settlement_batches", "ledger_postings",
             "ledger_journals", "outbox_commands", "provider_events", "refund_requests", "review_cases",
-            "payment_transactions", "audit_events", "idempotency_records", "risk_decisions", "payment_intents", "merchant_api_keys",
-            "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments", "sim_api_requests");
+            "payment_transactions", "audit_events", "idempotency_records", "risk_decisions", "merchant_events",
+            "merchant_webhook_endpoints", "payment_intents", "merchant_api_keys", "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments", "sim_api_requests");
 
     @Autowired protected MockMvc mockMvc;
     @Autowired protected ObjectMapper objectMapper;
@@ -141,6 +144,9 @@ public abstract class IntegrationTest {
     @Autowired protected ThreeWayReconciliationService threeWayReconciliationService;
     @Autowired protected ReconciliationBreakRepository breakRepository;
     @Autowired protected SettlementBatchRepository settlementBatchRepository;
+    @Autowired protected MerchantSimulator merchantSimulator;
+    @Autowired protected MerchantWebhookDispatcher merchantWebhookDispatcher;
+    @Autowired protected MerchantEventRepository merchantEventRepository;
 
     protected String merchantAKey;
     protected String merchantBKey;
@@ -151,6 +157,7 @@ public abstract class IntegrationTest {
         simFaults.clear();
         simLatency.recover();
         bankFaults.clear();
+        merchantSimulator.reset();
         providerClient.reset();
         truncateAll();
         merchantAKey = merchantService.register(new RegisterMerchantRequest(MERCHANT_A, "Merchant A"), OPS_ANA).apiKey().apiKey();

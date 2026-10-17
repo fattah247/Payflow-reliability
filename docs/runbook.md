@@ -256,3 +256,30 @@ calls `/approve` or `/reject-proposal`. The proposer cannot approve their own pr
 
 **Do.** The refresh reads the database: check database availability and the application log for
 "Could not refresh operational metrics". Check that the scheduler is running.
+
+<a id="merchant-webhooks-failing"></a>
+## PayflowMerchantWebhooksFailing (ticket)
+
+**Meaning.** Every delivery attempt for some events failed (20 attempts over roughly 7 to 13 hours by default), so those shops
+may not know a payment succeeded, failed or was refunded. The events are kept, readable and redeliverable.
+
+**Do.** See which shops and why:
+
+```bash
+curl -s -H "Authorization: Bearer $OPS_KEY" "localhost:8080/api/events?status=FAILED" | jq '.[] | {merchantId, type, paymentIntentId, attempts, lastStatusCode, lastError}'
+```
+
+`lastError` says what the shop's server did: an HTTP status (often 401 when the shop verifies with an old secret, 5xx
+when its server is broken), no answer within the read timeout, or a refused connection. Tell the shop; they can catch up
+from `GET /api/events` with their own key. Once their endpoint works, send each event again
+(`POST /api/events/{id}/redeliver`); the shop deduplicates by event id, so a copy it already has does no harm.
+
+<a id="merchant-notifications-delayed"></a>
+## PayflowMerchantNotificationsDelayed (ticket)
+
+**Meaning.** An event has waited over an hour to be delivered. Either one shop's endpoint has been failing for a while
+(retries back off up to an hour apart), or the sender is not running at all.
+
+**Do.** `GET /api/events?status=PENDING` and look at `merchantId`, `attempts` and `lastError`. Many shops at once, or
+`attempts` 0 everywhere, means the sender is stuck: check the application log and `POST /api/merchant-webhooks/run`
+(it reports what it attempted). One shop with growing attempts is the case above: tell the shop.

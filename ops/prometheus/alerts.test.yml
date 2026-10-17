@@ -109,3 +109,44 @@ tests:
             exp_annotations:
               summary: "1 checkout(s) charged more than once: a client is not reusing its idempotency key"
               runbook: docs/runbook.md#duplicate-charge
+
+  # Events given up on raise a ticket after 15 minutes; redelivering them clears it.
+  - interval: 1m
+    input_series:
+      - series: 'payflow_merchant_events_failed{instance="app"}'
+        values: '0x5 2x30 0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PayflowMerchantWebhooksFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: PayflowMerchantWebhooksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              instance: app
+            exp_annotations:
+              summary: "2 merchant event(s) were given up on after every delivery attempt"
+              runbook: docs/runbook.md#merchant-webhooks-failing
+      - eval_time: 40m
+        alertname: PayflowMerchantWebhooksFailing
+        exp_alerts: []
+
+  # The oldest undelivered event ages past an hour (a shop down for long, or the sender not running).
+  - interval: 1m
+    input_series:
+      - series: 'payflow_merchant_events_oldest_pending_age_seconds{instance="app"}'
+        values: '0+60x90'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: PayflowMerchantNotificationsDelayed
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: PayflowMerchantNotificationsDelayed
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              instance: app
+            exp_annotations:
+              summary: "A merchant event has waited over an hour to be delivered"
+              runbook: docs/runbook.md#merchant-notifications-delayed

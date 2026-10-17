@@ -12,7 +12,9 @@ import java.util.List;
  * Refuses to start with a provider setup that would let outsiders move money: the simulator (whose key
  * can create signed provider events) next to a real provider, or a real provider with the documented
  * local secrets. The same for the bank: the bank simulator (whose statements land payouts) next to a real
- * bank statement feed, or a real feed with the local key. Warns whenever a simulator is on.
+ * bank statement feed, or a real feed with the local key. Next to a real provider, also refuses the merchant simulator
+ * and webhook delivery to private addresses (which would let a shop's webhook URL probe our own network). Warns
+ * whenever a simulator is on.
  */
 @Component
 public class ProviderConfigurationGuard {
@@ -27,6 +29,9 @@ public class ProviderConfigurationGuard {
         List<String> problems = new ArrayList<>(problems(provider, simulatorEnabled));
         problems.addAll(bankProblems(environment.getProperty("payflow.bank.base-url"), environment.getProperty("payflow.bank.api-key"),
                 bankSimulatorEnabled));
+        problems.addAll(merchantWebhookProblems(provider,
+                environment.getProperty("payflow.merchant-webhooks.allow-private-addresses", Boolean.class, false),
+                environment.getProperty("payflow.merchant-sim.enabled", Boolean.class, false)));
         if (!problems.isEmpty()) {
             throw new IllegalStateException("Unsafe provider configuration: " + String.join(" ", problems));
         }
@@ -36,6 +41,20 @@ public class ProviderConfigurationGuard {
         if (bankSimulatorEnabled) {
             log.warn("The bank simulator is enabled: its statements can land payouts. Local use only.");
         }
+    }
+
+    static List<String> merchantWebhookProblems(ProviderProperties provider, boolean allowPrivateAddresses,
+                                                boolean merchantSimulatorEnabled) {
+        List<String> problems = new ArrayList<>();
+        boolean realProvider = provider.baseUrl() != null && !provider.baseUrl().isBlank();
+        if (realProvider && allowPrivateAddresses) {
+            problems.add("Merchant webhooks must not be sent to private addresses next to a real provider;"
+                    + " set payflow.merchant-webhooks.allow-private-addresses=false.");
+        }
+        if (realProvider && merchantSimulatorEnabled) {
+            problems.add("The merchant simulator must not run next to a real provider; set payflow.merchant-sim.enabled=false.");
+        }
+        return problems;
     }
 
     static List<String> bankProblems(String bankBaseUrl, String bankApiKey, boolean bankSimulatorEnabled) {

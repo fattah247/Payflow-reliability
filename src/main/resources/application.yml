@@ -102,6 +102,24 @@ payflow:
     statement-poll-interval: 1m
     # The first statement number expected per account; coverage (which days are complete) counts from here.
     first-statement-sequence: 1
+  # Notifications to shops (ADR 030, docs/merchant-webhooks.md): signed webhooks with retries, and an events list to catch up.
+  merchant-webhooks:
+    poll-interval: 1s
+    connect-timeout: 2s
+    read-timeout: 5s
+    # 30 s doubling to at most an hour apart, with jitter: 20 attempts span roughly 7 to 13 hours (a night's outage).
+    max-attempts: 20
+    base-backoff: 30s
+    max-backoff: 1h
+    lease: 30s
+    batch-size: 20
+    # After a rotation the previous secret keeps signing next to the new one for this long.
+    secret-rotation-overlap: 24h
+    # Local demos only: the merchant simulator listens on localhost. Refused at startup next to a real provider.
+    allow-private-addresses: ${PAYFLOW_MERCHANT_WEBHOOKS_ALLOW_PRIVATE:true}
+  # Simulated shops that receive webhooks (local only).
+  merchant-sim:
+    enabled: ${PAYFLOW_MERCHANT_SIM_ENABLED:true}
   checkout:
     # The checkout service level, measured inside the payment system: start to confirmed capture.
     confirmation-slo: 10s

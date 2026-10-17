@@ -120,6 +120,36 @@ public class MoneyInvariantService {
                                or p.confirmationMethod is null or p.confirmationMethod <> d.requiredConfirmation
                                or d.outcome <> id.fatarc.portfolio.payflowreliability.risk.RiskOutcome.CONFIRMED)""")));
 
+        // Payments created before notifications existed (no payment.created event) have nothing to announce against.
+        rules.add(rule("PAYMENT_CHANGES_ANNOUNCED", "Every payment's latest event tells the shop its current state, and every "
+                        + "state change has its own event.",
+                concat(strings("""
+                        select concat('payment ', cast(p.id as string), ' is ', cast(p.state as string),
+                                      ' but its latest event announces another state')
+                        from PaymentIntent p
+                        where exists (select 1 from MerchantEvent c where c.paymentIntentId = p.id
+                                      and c.eventType = 'payment.created')
+                          and not exists (select 1 from MerchantEvent e where e.paymentIntentId = p.id
+                                          and e.eventType in ('payment.created', 'payment.updated')
+                                          and e.state = cast(p.state as string)
+                                          and e.sequence = (select max(l.sequence) from MerchantEvent l
+                                                            where l.paymentIntentId = p.id
+                                                              and l.eventType in ('payment.created', 'payment.updated')))"""),
+                        strings("""
+                        select concat('payment ', cast(p.id as string), ' changed state ',
+                                      cast((select count(a) from AuditEvent a where a.paymentIntentId = p.id
+                                            and a.eventType = 'TRANSACTION_STATE_CHANGED') as string),
+                                      ' times but announced ',
+                                      cast((select count(e) from MerchantEvent e where e.paymentIntentId = p.id
+                                            and e.eventType = 'payment.updated') as string))
+                        from PaymentIntent p
+                        where exists (select 1 from MerchantEvent c where c.paymentIntentId = p.id
+                                      and c.eventType = 'payment.created')
+                          and (select count(a) from AuditEvent a where a.paymentIntentId = p.id
+                               and a.eventType = 'TRANSACTION_STATE_CHANGED')
+                              <> (select count(e) from MerchantEvent e where e.paymentIntentId = p.id
+                                  and e.eventType = 'payment.updated')"""))));
+
         if (providerSimulated) {
             rules.add(rule("NO_RETRY_CHARGES_TWICE", "One business operation, one charge: no merchant reference is paid twice "
                             + "at the provider, and no idempotency key is applied twice.",

@@ -56,6 +56,10 @@ public enum ErrorCode {
     BANK_STATEMENT_CONFLICT(HttpStatus.CONFLICT, false),
     BREAK_NOT_FOUND(HttpStatus.NOT_FOUND, false),
     BREAK_ACTION_NOT_APPLICABLE(HttpStatus.UNPROCESSABLE_ENTITY, false),
+    /** A webhook URL that is not https, carries credentials, or points at a private or otherwise non-public address. */
+    WEBHOOK_URL_NOT_ALLOWED(HttpStatus.UNPROCESSABLE_ENTITY, false),
+    WEBHOOK_ENDPOINT_NOT_FOUND(HttpStatus.NOT_FOUND, false),
+    MERCHANT_EVENT_NOT_FOUND(HttpStatus.NOT_FOUND, false),
 
     PROVIDER_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, true),
 
