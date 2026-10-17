@@ -148,6 +148,11 @@ public class RiskService {
      */
     @Transactional
     public Optional<RiskDecision> label(UUID paymentIntentId, RiskLabel label, RiskLabel.Source source, String actor) {
+        // The label goes into the payment's audit chain: take the payment's lock first, as every writer of that chain
+        // does, so a webhook arriving at the same moment queues instead of forking the chain.
+        if (payments.findForUpdate(paymentIntentId).isEmpty()) {
+            return Optional.empty();
+        }
         return decisions.findByPaymentIntentId(paymentIntentId).map(decision -> {
             decision.label(label, source, clock.instant());
             auditService.record(AggregateType.PAYMENT_INTENT,

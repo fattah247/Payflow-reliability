@@ -250,4 +250,23 @@ class DeviceRiskFlowTest extends IntegrationTest {
         assertThat(decisionOf(intent).getLabelSource()).isEqualTo(RiskLabel.Source.CHARGEBACK);
         assertThat(auditFor(intent)).extracting(AuditEvent::getEventType).contains("RISK_LABELLED");
     }
+
+    @Test
+    void shouldRecordALabelWhileTheProvidersWebhookArrivesForTheSamePayment() throws Exception {
+        // Labels arrive whenever they arrive; the provider does not wait. Both append to the payment's audit chain.
+        for (int i = 0; i < 12; i++) {
+            PaymentIntent intent = paymentIntentService.start(create("RISK-RACE-" + i, "40000", CLEAN).getId(), AS_MERCHANT_A);
+            java.util.concurrent.atomic.AtomicInteger turn = new java.util.concurrent.atomic.AtomicInteger();
+            String eventId = "evt-race-" + i;
+            String transaction = "tx-race-" + i;
+            List<Object> outcomes = race(2, () -> turn.getAndIncrement() == 0
+                    ? riskService.label(intent.getId(), RiskLabel.LEGITIMATE, RiskLabel.Source.CUSTOMER_REPORT, "operator:ops-ana")
+                    : webhook(intent.getId(), eventId, transaction, ProviderStatus.SUCCESS, "40000"));
+
+            assertThat(outcomes).as("round %d", i).noneMatch(outcome -> outcome instanceof Exception);
+            assertThat(stateOf(intent)).isEqualTo(PaymentState.SUCCESS);
+            assertThat(decisionOf(intent).getLabel()).isEqualTo(RiskLabel.LEGITIMATE);
+            assertThat(auditChainVerifier.verify(AuditHash.chainKey(intent.getId(), null, null)).valid()).isTrue();
+        }
+    }
 }
