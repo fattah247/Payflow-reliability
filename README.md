@@ -71,8 +71,16 @@ the bank statement, with the evidence at each stage, and shows slowness and devi
 - fraud stopped, fraud loss, honest money lost to friction, precision and recall from labelled traffic, and a
   threshold sweep that prices moving one threshold
 
+**Shops are told what happened, once and in order**
+- every payment and refund change is written as an event in the transaction of the change (a transactional outbox),
+  numbered per payment so a shop can put retried deliveries back in order
+- signed webhooks with a secret per shop and rotation without a gap; at least once, with leases, backoff and jitter,
+  a night's worth of retries, then kept and redeliverable; an events list to catch up from
+- webhook URLs cannot reach our own network: https to public addresses only, checked at registration and before every
+  delivery, redirects never followed ([integration guide](docs/merchant-webhooks.md))
+
 **The money rules hold together, under chaos**
-- eleven money rules checked on demand, with evidence for every violation
+- twelve money rules checked on demand, with evidence for every violation
 - a property-based test throws long random histories of faults at the real application and checks every rule;
   nine deliberate breakages of the protections were each caught by it
 - a seeded chaos run plays the same kinds of faults against the packaged app in CI
@@ -328,7 +336,8 @@ value-date windows and expiry are tested without sleeping.
 | Reconciliation | per-row verdicts incl. refunded amounts, payouts missing from the report, merchant-scoped reports, safe re-import, nothing RECONCILED without a landed payout, breaks with owners, due times and the actions allowed |
 | Slowness | confirmations counted against the SLO, money past the SLO, abandoned checkouts measured exactly as the seeded customers behaved, zero duplicate charges with per-checkout keys and every one counted with per-attempt keys, alert rules unit-tested with `promtool` |
 | Device risk | the app's decisions reproduced for all 256 signal combinations, step-up hold, confirmation method, expiry, block never started, retries keep the first decision, rogue captures to review, fraud stopped, loss, friction, precision and recall equal to the ground truth, the threshold sweep's trade-off |
-| Money rules | eleven rules checked after 50 random histories of faults per run, with coverage checks on what the histories reached; each rule shown catching a planted violation; a seeded chaos run against the live API |
+| Merchant webhooks | events written only with their change (a rolled-back change has none), per-payment sequence, deliveries over real HTTP to a simulated shop that verifies signatures, deduplicates and ignores stale events; retries for errors, redirects and slow answers; giving up and redelivering; secret rotation with overlap; catch-up paging; isolation between shops; SSRF refusals for 26 kinds of address |
+| Money rules | twelve rules checked after 50 random histories of faults per run, with coverage checks on what the histories reached; each rule shown catching a planted violation; a seeded chaos run against the live API |
 | Review | allowed actions, release / fail / reverse, two-person approval, proposals rejected, two operators racing |
 | Ledger and audit | every journal balanced, balances per merchant, invariant violations detected, hash chain tamper detection, append-only triggers (PostgreSQL) |
 | Operations | case file, summary, sweep endpoint, alerting gauges, every alert rule references an exported metric and has a runbook, the worklist (one queue across review cases, proposals and breaks, due order, owners, the suggested payout for an unmatched credit, and calls that are followed to prove they resolve the item) |
@@ -648,6 +657,24 @@ and `X-Next-After: <cursor>`; the last page carries neither. The cursor is opaqu
 matching row exactly once. Bodies stay plain JSON arrays (the worklist keeps its object and adds `next`). A cursor
 that was not issued by the list is **400** `VALIDATION_FAILED`.
 
+### Merchant notifications
+
+See the [integration guide](docs/merchant-webhooks.md) for verifying signatures and processing events once, in order.
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| PUT | `/api/webhook-endpoint` | M | Body `{url}`. **201** with the signing `secret`, shown once; **200** when moving an existing endpoint (the secret is kept and not shown). **422** `WEBHOOK_URL_NOT_ALLOWED` for anything but https to a public address |
+| GET | `/api/webhook-endpoint` | M | The endpoint, without the secret; **404** `WEBHOOK_ENDPOINT_NOT_FOUND` |
+| DELETE | `/api/webhook-endpoint` | M | Switch deliveries off; events are still recorded (`SKIPPED`) and listed |
+| POST | `/api/webhook-endpoint/rotate-secret` | M | A new `secret`; the previous one keeps signing next to it until `previousSecretSignsUntil` (24 h) |
+| GET | `/api/events?paymentIntentId=&type=&status=&from=&limit=&after=` | M, O | Events oldest first, with their delivery state and the exact `payload`; a merchant sees its own, an operator may pass `merchantId` |
+| GET | `/api/events/{id}` | M, O | Another merchant's event is **404** `MERCHANT_EVENT_NOT_FOUND` |
+| POST | `/api/events/{id}/redeliver` | M, O | Send again from the first attempt (a pending one: now, without waiting for its backoff); **404** `WEBHOOK_ENDPOINT_NOT_FOUND` without an enabled endpoint |
+| POST | `/api/merchant-webhooks/run` | O | Run the sender now (it also runs every second) |
+
+Deliveries are `POST`s with `Payflow-Event-Id`, `Payflow-Event-Type` and `Payflow-Signature: t=<unix>,v1=<hex>` (two
+`v1` during a rotation). Event types: `payment.created`, `payment.updated`, `refund.created`, `refund.updated`.
+
 ### Simulations and simulators (local only)
 
 | Method | Path | Notes |
@@ -662,6 +689,8 @@ that was not issued by the list is **400** `VALIDATION_FAILED`.
 | GET | `/bank-sim/v1/accounts`, `/bank-sim/v1/statements/{id}` | The settlement account and its camt.053 statements |
 | POST | `/bank-sim/v1/days/close` | Close business days through a date, issuing a statement for each |
 | POST / DELETE | `/bank-sim/v1/faults` | `LATE_CREDIT`, `DROP_CREDIT`, `DUPLICATE_CREDIT`, `NET_OF_FEES`, `WRONG_REFERENCE`, `MISSING_REFERENCE`, `RETURN_PAYOUT`, `RESEND_STATEMENT` |
+| POST | `/merchant-sim/v1/shops/{shop}/webhooks` | A simulated shop's webhook receiver: verifies the signature, processes each event id once, ignores events older than what it applied |
+| PUT / POST / GET / DELETE | `/merchant-sim/v1/shops/{shop}/secret`, `/faults`, `/merchant-sim/v1/shops/{shop}` | Give the shop its secret; make it fail (`failNext`, `status`) or answer slowly (`slowNext`, `delayMillis`); see what it received and applied; forget it |
 
 ### Errors
 
@@ -743,13 +772,14 @@ show one refund.
 
 ## Operations
 
-- **Background jobs**: outbox worker and simulated webhook delivery (1 s), bank statement pull (1 min), status
+- **Background jobs**: outbox worker, simulated provider webhooks and merchant webhooks (1 s), bank statement pull (1 min), status
   sweeper (which also expires unconfirmed step-ups), ledger check and three-way reconciliation (5 min),
   idempotency cleanup (1 h), gauge refresh (30 s). `payflow.workers.enabled=false` turns them all off.
 - **Metrics**: `payflow.outbox.*`, `payflow.review.queue.*`, `payflow.payments.stuck`,
   `payflow.ledger.invariant.*`, `payflow.webhook.*`, `payflow.sweeper.*`, `payflow.reconciliation.breaks.*`,
   `payflow.payouts.broken`, `payflow.bank.statement.import.age`, `payflow.money.at.risk.*`,
-  `payflow.payment.confirmations`, `payflow.risk.*`, `payflow.health.up`, plus the standard HTTP, JVM and pool metrics.
+  `payflow.payment.confirmations`, `payflow.risk.*`, `payflow.merchant.events.*`, `payflow.merchant.webhook.deliveries`,
+  `payflow.health.up`, plus the standard HTTP, JVM and pool metrics.
 - **Alerts**: [`ops/prometheus/alerts.yml`](ops/prometheus/alerts.yml), validated by `promtool` in CI and by a
   test against the real metrics output. Each alert links to its section in the [runbook](docs/runbook.md).
 - **Tracing**: trace and span ids on every log line and propagated on provider calls (OpenTelemetry bridge;
@@ -764,6 +794,7 @@ show one refund.
 - [Settlement Certainty](docs/settlement-certainty.md): the money from capture to the bank, slowness and device
   risk as money, and how it is all tested together
 - [Idempotency Keys: the client contract](docs/idempotency-keys.md)
+- [Merchant Webhooks: the integration guide](docs/merchant-webhooks.md)
 - [Demo Flow](docs/demo-flow.md)
 - [Architecture Flow](docs/architecture-flow.md)
 - [Failure Scenarios](docs/failure-scenarios.md), each with the test that proves it
@@ -801,6 +832,8 @@ Intentional omissions, and what a production deployment would add:
 - simulated customers and fraudsters are models with documented parameters, never data; device risk decides per
   payment, without velocity rules across attempts
 - no multi-region behavior or message broker; the outbox is the seam where one would go
+- merchant webhook URLs are checked before sending, but the HTTP client resolves the name again (DNS rebinding);
+  production sends through an egress proxy that enforces the same rule, and keeps signing secrets encrypted
 
 The full list for the settlement and risk work is in [Settlement certainty: honest limits](docs/settlement-certainty.md#6-honest-limits).
 

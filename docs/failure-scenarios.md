@@ -502,13 +502,56 @@ webhooks, refunds while the provider is down or commits then times out, workers 
 racing settlement runs, chargebacks around payout, every bank fault, re-imported and re-issued statements, slow
 periods, abandoned checkouts, step-ups and blocks, and a provider charging a blocked payment.
 
-Expected: once everything settles, all eleven money rules hold (`GET /api/operations/invariants`): books balance
+Expected: once everything settles, all twelve money rules hold (`GET /api/operations/invariants`): books balance
 against the bank and the open breaks to the cent, no capture paid out twice, nothing reconciled without a bank
 line, every unmatched line has a break, no bank entry booked twice, every landing proven, no blocked payment at the
 provider, no step-up started unconfirmed, no retry charged twice, refunds and payouts executed once.
 
 Proof: `MoneyInvariantPropertyTest` (50 random histories per run, with coverage checks), `ChaosRunTest`,
 `./scripts/scenarios.sh chaos` against the packaged app in CI
+
+## Telling the shop
+
+### The shop's server is down, slow, or answers with a redirect
+
+Expected: every failed delivery (an error status, a redirect, which is never followed, or no answer within the read
+timeout) is retried with exponential backoff and jitter; after the last attempt the event is `FAILED`, still listed
+and redeliverable; a shop that processed a delivery but answered too late gets it again and recognizes the event id.
+
+Proof: `MerchantWebhookTest.shouldRetryErrorsRedirectsAndSlowAnswersWithBackoffUntilTheShopAnswers`,
+`shouldGiveUpAfterTheLastAttemptAndSendAgainWhenAsked`
+
+### Deliveries arrive out of order
+
+Expected: events are numbered per payment; when a retried event arrives after a newer one, the shop (as the guide
+asks, and as the simulated shop does) ignores it as stale and keeps the newer state.
+
+Proof: `MerchantWebhookTest.shouldAnnounceRefundsAndPutOvertakenDeliveriesBackInOrder`
+
+### A change rolls back, or the shop has no endpoint
+
+Expected: an event is written in the transaction of its change, so a rolled-back change has no event; without an
+endpoint, events are recorded as `SKIPPED` and listed; switching the endpoint off skips what was waiting.
+
+Proof: `MerchantWebhookTest.shouldWriteAnEventOnlyWithItsChangeAndKeepItReadableWithoutAnEndpoint`; the money rule
+`PAYMENT_CHANGES_ANNOUNCED` (`shouldCatchAChangeTheShopWasNeverTold`, and after every random history of faults)
+
+### The signing secret is rotated
+
+Expected: for 24 hours deliveries carry signatures with both secrets, so a shop verifies before and after it switches;
+after the overlap only the new secret signs. A forged delivery does not verify.
+
+Proof: `MerchantWebhookTest.shouldKeepVerifyingThroughASecretRotation`, the `merchant-webhooks` scenario
+
+### A shop points its webhook at our own network
+
+Expected: only https URLs whose host resolves to public addresses are accepted, at registration and before every
+delivery: loopback, private, link-local (cloud metadata), carrier-grade NAT, multicast and reserved addresses are
+refused, also inside IPv4-mapped and NAT64 IPv6 addresses; credentials in the URL are refused; redirects are never
+followed. Next to a real provider, the application refuses to start with private addresses allowed.
+
+Proof: `DestinationGuardTest`, `MerchantWebhookTest.shouldRefuseEndpointsThatAreNotSafeToSendTo`,
+`ProviderConfigurationGuard`
 
 ## Operations and evidence
 

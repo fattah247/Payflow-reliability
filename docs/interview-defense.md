@@ -173,7 +173,7 @@ biased; real systems keep a small random holdout.
 
 ## How do you test that all of this holds together?
 
-Eleven money rules are production code with evidence for every violation. A property-based test plays 50 random
+Twelve money rules are production code with evidence for every violation. A property-based test plays 50 random
 histories of 20 to 60 faults per run against the real application (duplicate and lost webhooks, commit-then-timeout,
 crashed workers, racing settlements, chargebacks around payout, every bank fault, slow periods, device-risk
 decisions) and checks every rule, and it also fails if the histories did not reach the hard states often enough.
@@ -189,6 +189,18 @@ list and the pager agree. Each item names the owner, the money, the next step an
 test follows those calls to prove they work. For a credit nobody could match, it names the payout expecting exactly
 that amount, but it does not assign it: matching by amount alone is the mistake the bank leg exists to prevent, so a
 person confirms with the bank and the server still checks the amount. ([ADR 029](adr/029-one-worklist-for-people.md))
+
+## How does a shop learn what happened to its payments?
+
+From events written in the same transaction as the change (a transactional outbox), so nothing is announced that
+rolled back and nothing that committed goes unannounced. A sender delivers them as signed webhooks, at least once, with
+leases, backoff and jitter, and never inside a payment transaction, so a slow shop cannot slow payments down. Exactly
+once is impossible over HTTP to a server we do not control (it can process a delivery and fail before answering), so
+each event carries an id to deduplicate and a per-payment sequence to put retries back in order; the guide shows the
+shop's side, and the simulated shop in the demo does it. The events list is the record: a shop that was down catches up
+from it. Because the shop chooses the URL our servers call, the URL is checked against our own network before every
+delivery (SSRF), and redirects are never followed. The honest gap is DNS rebinding between the check and the connect;
+an egress proxy closes it. ([ADR 030](adr/030-merchant-notifications.md))
 
 ## What would you add for production?
 

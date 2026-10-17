@@ -337,6 +337,7 @@ them.
 | `LANDING_IS_PROVEN` | every landed payout carries its reference, or a named operator assigned it |
 | `BLOCKED_NEVER_REACHES_THE_PROVIDER` | a blocked payment is never started, captured or sent to the provider |
 | `STEP_UP_CONFIRMED_BEFORE_CAPTURE` | a step-up payment starts, and so captures, only after it was confirmed |
+| `PAYMENT_CHANGES_ANNOUNCED` | every payment change has an event for the shop, and the latest one announces the current state ([ADR 030](adr/030-merchant-notifications.md)) |
 | `NO_RETRY_CHARGES_TWICE` | no merchant reference charged twice; no idempotency key applied twice at the provider |
 | `REFUNDED_ONCE` | what the provider refunded equals what we recorded, plus refunds in flight |
 | `PAYOUT_SENT_ONCE` | the provider paid each batch out at most once |
