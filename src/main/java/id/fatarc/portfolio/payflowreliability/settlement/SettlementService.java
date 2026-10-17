@@ -4,8 +4,12 @@ import id.fatarc.portfolio.payflowreliability.audit.AggregateType;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.Keyset;
 import id.fatarc.portfolio.payflowreliability.common.Money;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerService;
+import id.fatarc.portfolio.payflowreliability.outbox.OutboxService;
 import id.fatarc.portfolio.payflowreliability.payment.*;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequest;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequestRepository;
@@ -14,6 +18,7 @@ import jakarta.persistence.EntityManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,6 +43,8 @@ import java.util.stream.Collectors;
  *       deadlocking and a second run finds nothing left to settle.</li>
  *   <li>Each capture, refund and reversal can be settled at most once (unique constraints), and the
  *       payout journal is posted in the same transaction.</li>
+ *   <li>The payout instruction to the provider is queued in the same transaction (outbox, key
+ *       {@code payout-<batchId>}). The batch is SENT; only a matched bank credit makes it LANDED (ADR 025).</li>
  * </ul>
  */
 @Service
@@ -54,6 +61,7 @@ public class SettlementService {
     private final SettlementBatchRepository settlementBatchRepository;
     private final SettlementBatchItemRepository settlementBatchItemRepository;
     private final LedgerService ledgerService;
+    private final OutboxService outboxService;
     private final AuditService auditService;
     private final Clock clock;
 
@@ -64,6 +72,7 @@ public class SettlementService {
                              SettlementBatchRepository settlementBatchRepository,
                              SettlementBatchItemRepository settlementBatchItemRepository,
                              LedgerService ledgerService,
+                             OutboxService outboxService,
                              AuditService auditService,
                              Clock clock) {
         this.entityManager = entityManager;
@@ -73,6 +82,7 @@ public class SettlementService {
         this.settlementBatchRepository = settlementBatchRepository;
         this.settlementBatchItemRepository = settlementBatchItemRepository;
         this.ledgerService = ledgerService;
+        this.outboxService = outboxService;
         this.auditService = auditService;
         this.clock = clock;
     }
@@ -135,6 +145,8 @@ public class SettlementService {
             }
         }
         ledgerService.payout(batch.getId(), merchantId, batchCurrency, batch.getTotalAmount());
+        // The payout instruction is written with the batch: one transaction, so neither exists without the other.
+        outboxService.enqueuePayout(batch.getId());
 
         auditService.record(AggregateType.SETTLEMENT_BATCH, batch.getId().toString(), null, "SETTLEMENT_CREATED",
                 caller.name(),
@@ -171,11 +183,11 @@ public class SettlementService {
 
     /** Newest first; optionally for one merchant. */
     @Transactional(readOnly = true)
-    public List<SettlementBatch> listBatches(String merchantId) {
-        Sort newestFirst = Sort.by(Sort.Direction.DESC, "createdAt");
-        return merchantId == null || merchantId.isBlank()
-                ? settlementBatchRepository.findAll(newestFirst)
-                : settlementBatchRepository.findByMerchantId(merchantId, newestFirst);
+    public PageSlice<SettlementBatch> listBatches(String merchantId, PageCursor after, Integer limit) {
+        Specification<SettlementBatch> filter = merchantId == null || merchantId.isBlank() ? Keyset.all()
+                : (root, query, cb) -> cb.equal(root.get("merchantId"), merchantId);
+        return Keyset.page(settlementBatchRepository, filter, "createdAt", false, after, limit,
+                batch -> new PageCursor(batch.getCreatedAt(), batch.getId()));
     }
 
     @Transactional(readOnly = true)

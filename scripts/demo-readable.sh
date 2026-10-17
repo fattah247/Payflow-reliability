@@ -71,11 +71,12 @@ show "refund more than is left" "HTTP $STATUS  $(pick code)"
 
 section "6. Net settlement"
 as_ops request POST "/api/settlements/batches?merchantId=$MERCHANT_ID" ""
+BATCH=$(pick id)
 show "batch" "HTTP $STATUS  captures $(pick captureAmount) - refunds $(pick deductionAmount) = $(pick totalAmount) IDR"
 as_ops request POST "/api/settlements/batches?merchantId=$MERCHANT_ID" ""
 show "run it again" "HTTP $STATUS  $(pick code)"
 
-section "7. Two-sided reconciliation"
+section "7. Three-way reconciliation: ledger, provider report, bank statement"
 TODAY="$(date +%F)"
 TX_A=$(provider_tx "$PAYMENT_A")
 as_ops request POST /api/reconciliation/reports "{\"settlementDate\": \"$TODAY\", \"merchantId\": \"$MERCHANT_ID\", \"rows\": [
@@ -83,6 +84,17 @@ as_ops request POST /api/reconciliation/reports "{\"settlementDate\": \"$TODAY\"
 ]}"
 show "row 1 (payment A)" "$(pick rows.0.outcome)"
 show "payment B (paid out, not reported)" "$(pick rows.1.outcome)"
+for attempt in $(seq 1 30); do
+  batch_view "$BATCH"
+  [ "$(pick payoutStatus)" != "SENT" ] && break
+  run_outbox
+  sleep 0.5
+done
+show "provider pays the batch out" "fee $(pick provider.fee), net $(pick provider.net), value date $(pick provider.expectedValueDate)"
+bank_catch_up "$(pick provider.expectedValueDate)"
+batch_view "$BATCH"
+show "bank statement imported" "payout $(pick payoutStatus): $(pick bank.0.received) credited, reference $(pick payoutReference)"
+show "payments A / B" "$(states "$PAYMENT_A" "$PAYMENT_B") (B was never in the provider's report)"
 
 section "8. Refund after reconciliation needs two operators"
 as_merchant request POST "/api/refunds/payment-intents/$PAYMENT_A" \

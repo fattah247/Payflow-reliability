@@ -31,6 +31,25 @@ payflow:
     delivery-base-backoff: 1ms
     delivery-max-backoff: 2ms
     fault-delay: 1500ms
+    latency-time-scale: 0.0
+  loadgen:
+    checkout:
+      enabled: true
+  bank-sim:
+    enabled: true
+    api-key: bank_test_statement_key
+  bank:
+    base-url:
+    api-key: bank_test_statement_key
+  merchant-webhooks:
+    max-attempts: 3
+    base-backoff: 1ms
+    max-backoff: 2ms
+    lease: 2s
+    read-timeout: 500ms
+    allow-private-addresses: true
+  merchant-sim:
+    enabled: true
   # Tests run every background job explicitly, so outcomes do not depend on timing.
   workers:
     enabled: false

@@ -33,6 +33,17 @@ keys are scoped per caller and forgotten after 24 hours.
 
 Proof: `IdempotencyFilterTest`
 
+### A retry that was serialized differently
+
+What happened: an operator tool retries with the same `Idempotency-Key`, but its JSON library writes the keys
+in another order and `1000.00` instead of `1000`.
+
+Expected: recognized as the same request (canonical fingerprint) and replayed; a different amount under the same
+key, or the same key on another endpoint, is 422 `IDEMPOTENCY_KEY_REUSED`. Payment keys still replay after 30
+days; refund keys are scoped to their payment.
+
+Proof: `IdempotencyKeyRulesTest`, `RequestFingerprintTest`
+
 ### Unauthenticated, cross-merchant and over-privileged calls
 
 Expected: no key is 401; another merchant's payment or refund is 404; a merchant on an operator
@@ -181,6 +192,30 @@ worker finds the refund by its key and records it once.
 
 Proof: `OutboxRecoveryTest.shouldNeverCancelARefundTheProviderMayAlreadyHave`
 
+### The worker dies right after the provider refunded (real crash)
+
+What happened: the worker's thread dies between the provider's answer and our commit.
+
+Expected: the next worker, after the lease expires, sends the same key (`refund-<refundId>`), the provider
+answers with its stored result, and the refund is recorded once. The provider's own request log shows a single
+key and one applied operation.
+
+Proof: `OutboundIdempotencyKeyTest.shouldResendTheSameKeyAfterAWorkerDiesOnceTheProviderActed`,
+`shouldSendEveryAttemptUnderTheSameKey`
+
+### The provider has forgotten the key
+
+What happened: a call first sent more than a day ago is still unresolved, and the provider prunes idempotency
+keys after 24 hours. It now answers "unknown key", which could mean "never received" or "forgot".
+
+Why it matters: a resend under the forgotten key is a new refund.
+
+Expected: past `payflow.provider.key-resend-window` (23 h) the worker only looks the key up and never resends;
+an unknown key escalates for a person to check the provider's records. The customer is refunded once.
+
+Proof: `OutboundIdempotencyKeyTest.shouldNeverResendUnderAKeyTheProviderMayHaveForgotten`,
+`ProviderSimulatorTest.shouldForgetIdempotencyKeysAfterTheRetentionPeriodLikeARealProvider`
+
 ### A lookup fails after an unknown outcome
 
 Expected: a refused or failed lookup (for example during a key rotation) is an unknown outcome, never a
@@ -295,6 +330,228 @@ Expected: with a settlement date (and optionally a merchant), every payout recor
 reported is flagged `MISSING_FROM_REPORT` and opens a case.
 
 Proof: `ReconciliationTest.shouldFlagPayoutsTheProviderDidNotReport`, `shouldAcceptAnEmptyReportForADayWithNoProviderActivity`
+
+## The bank leg (settlement certainty)
+
+Every case below ends in exactly one place: the payout LANDED, or the money is in `bank_suspense` with an open
+break that says why, who owns it and when it is due. After each test the ledger check proves that bank credits
+equal payouts minus fees plus what open breaks hold, to the cent. Fees in the examples: the provider deducts
+30 bps (9.00 on a 3000.00 payout, net 2991.00).
+
+### The provider says it paid
+
+Expected: the payout is IN_TRANSIT (money in `payouts_in_transit`), never LANDED, until a bank credit matches it
+by reference, amount and value date.
+
+Proof: `PayoutLifecycleTest.shouldGoFromSentToInTransitToLandedWithTheFeeOnItsOwnLine`, `shouldNotTreatTheProvidersWordAsArrival`
+
+### The provider refuses the payout; the worker dies after the provider paid
+
+Expected: BROKEN(PROVIDER_REFUSED) with a break for provider operations, money still with the provider; after a
+crash the next worker finds the payout by its key (`payout-<batchId>`), one payout, one credit.
+
+Proof: `PayoutLifecycleTest.shouldBreakAPayoutTheProviderRefusesAndLeaveTheMoneyWithTheProvider`,
+`shouldResendAPayoutUnderItsKeyAfterAWorkerDiesOnceTheProviderPaid`
+
+### Missing credit
+
+Expected: declared only once every statement through the end of the value-date window has arrived; BROKEN
+(MISSING_CREDIT), a treasury break due in 24 hours, overdue after that. A credit that turns up later still lands it.
+
+Proof: `ThreeWayReconciliationTest.shouldDeclareACreditMissingOnlyWhenEveryStatementThroughTheWindowHasArrived`
+
+### Late credit
+
+Expected: inside the window it simply lands; outside it is held in suspense (LATE_CREDIT) until a person assigns
+it, which lands the payout and closes the missing-credit break too.
+
+Proof: `shouldLandACreditThatIsLateButInsideTheWindow`, `shouldHoldACreditOutsideTheWindowUntilSomeoneAcceptsIt`
+
+### Duplicate credit
+
+Expected: the first lands, the second is held in suspense (DUPLICATE_CREDIT) and cannot be acknowledged away;
+when the bank takes it back, suspense returns to zero and the payout stays landed.
+
+Proof: `shouldHoldADuplicateCreditInSuspenseUntilTheBankTakesItBack`
+
+### Credit net of a bank charge
+
+Expected: the charge itemized in the statement is booked as its own line: received 2984.50 + provider fee 9.00
++ bank charges 6.50 = gross 3000.00. A shortfall the bank does not itemize is an AMOUNT_MISMATCH.
+
+Proof: `shouldBookBankChargesAsTheirOwnLineSoGrossMinusFeesIsExactlyNet`, `shouldHoldACreditWhoseAmountDoesNotAddUp`
+
+### Wrong or missing reference
+
+Expected: never matched by amount, even when a payout of exactly that amount is waiting; held in suspense
+(UNMATCHED_CREDIT) until assigned. An assignment overrides the reference, never the amount.
+
+Proof: `shouldNeverMatchByAmountAlone`, `shouldRefuseToAssignACreditWhoseAmountDoesNotMatch`
+
+### Returned payout
+
+Expected: the return debit puts the money back on the provider (`provider_receivable`), the payout is
+BROKEN(RETURNED), treasury gets a break.
+
+Proof: `shouldPutAReturnedPayoutBackOnTheProvider`
+
+### A statement imported twice, re-sent, repeated, or out of order
+
+Expected: the same file twice books nothing twice; the same id with other content is a conflict (409, a break);
+a statement repeating yesterday's entry is not booked twice and treasury is told; statements arriving in any
+order book the same, and a gap is never mistaken for a missing credit.
+
+Proof: `shouldImportTheSameStatementTwiceWithoutBookingAnythingTwice`, `shouldIgnoreAStatementTheBankDeliversTwice`,
+`shouldBookStatementsTheSameWhateverOrderTheyArriveIn`, `shouldMatchACreditThatArrivedBeforeTheProviderConfirmed`
+
+### Provider report vs ledger; no reconciliation without the bank
+
+Expected: the provider's payout rows must agree with the ledger and with its own answer (fee, net, payout id);
+payouts it omits or invents are breaks. A clean payment row is MATCHED_AWAITING_BANK until the payout lands.
+
+Proof: `ProviderPayoutReportTest`, `ReconciliationTest.shouldReconcileOnlyOnceTheReportMatchesAndThePayoutHasLanded`
+
+## Slowness (up, but costing money)
+
+The customers in these tests are simulated (`CheckoutLoadGenerator`, seed 42): their patience and choices are model
+parameters, documented in ADR 027, not observed behaviour.
+
+### The provider is slow but up
+
+What happened: the provider's payment page and payment answers slow down and its webhooks lag, while every health
+check passes.
+
+Expected: customers with less patience leave (the shop cancels their payment as ABANDONED) or retry; paid payments
+wait past the confirmation SLO. The payment system measures the abandoned amount, the payments and money stuck past
+the SLO, and confirmations outside the SLO once the provider recovers, and each figure equals the simulation's own
+count. `PayflowSlowButUp` pages while `payflow_health_up` is 1.
+
+Proof: `CheckoutLoadTest.shouldMeasureWhatASlowProviderCostsWhileEverythingIsUp`, `CheckoutSloTest`,
+`ops/prometheus/alerts.test.yml`
+
+### Impatient customers press pay again
+
+Expected: with one key per checkout every retry is answered with the original payment and the provider refuses to
+charge it twice: zero duplicate charges. With a key per attempt each retry is a new payment, charged again, and the
+payment system counts every duplicate (`PayflowDuplicateCharge` pages).
+
+Proof: `CheckoutLoadTest.shouldShowWhatAKeyPerAttemptCosts`
+
+### The customer pays after the shop gave up
+
+Expected: a capture for a CANCELLED payment is never applied; it goes to review (the provider holds money for a
+cancelled checkout and someone has to return it).
+
+Proof: `CheckoutSloTest.shouldSendACaptureForACancelledCheckoutToReviewInsteadOfTakingTheMoney`
+
+## Device risk (what the gate stops, what it costs)
+
+The labelled customers in these tests are simulated (`RiskTrafficGenerator`, seed 42): device profiles, amounts,
+fraud share and step-up completion are model parameters, documented in ADR 028, not observed fraud.
+
+### A rooted phone, a lying device
+
+What happened: the app reports a high-severity signal (for example `root_package`) and claims its own level is LOW.
+
+Expected: the server recomputes the level from the signals, blocks (`SEVERE_SIGNAL`), records both levels, and
+never starts the payment: no provider page, no provider call, no outbox command. Starting it fails with
+`422 PAYMENT_BLOCKED`. It counts in money at risk as blocked today.
+
+Proof: `DeviceRiskFlowTest.shouldBlockForGoodAndNeverHandTheBlockedPaymentToTheProvider`,
+`DeviceRiskPolicyTest.shouldNeverTrustTheLevelTheDeviceReportsForItself`
+
+### A step-up nobody confirms
+
+Expected: the payment waits in REQUIRES_CONFIRMATION (starting it fails with `409 STEP_UP_REQUIRED`) and counts as
+money awaiting confirmation. The wrong method, or an operator, cannot confirm it. With the right method it starts
+like any other; without, the sweeper expires it after the confirmation timeout, still never having reached the
+provider. A cancelled step-up is recorded as abandoned friction.
+
+Proof: `DeviceRiskFlowTest.shouldHoldASteppedUpPaymentUntilTheCustomerConfirms`,
+`shouldExpireAStepUpNobodyConfirmedWithoutEverReachingTheProvider`, `shouldRecordACancelledStepUpAsAbandonedFriction`
+
+### A retry with cleaned evidence
+
+What happened: the shop retries the blocked request with the same idempotency key, this time with no signals.
+
+Expected: the same payment, still BLOCKED; the decision is taken once. Changing what is bought under the same key is
+a different request (`422 IDEMPOTENCY_KEY_REUSED`).
+
+Proof: `DeviceRiskFlowTest.shouldAnswerARetryWithTheFirstDecisionWhateverEvidenceItCarries`
+
+### The provider charges a blocked or unconfirmed payment anyway
+
+Expected: the capture is never applied; it goes to review, and no capture journal is posted.
+
+Proof: `DeviceRiskFlowTest.shouldSendACaptureForABlockedOrUnconfirmedPaymentToReviewInsteadOfApplyingIt`
+
+### Is the gate worth it?
+
+Expected: from its own decisions and the labels learned afterwards, the payment system reports fraud stopped, fraud
+loss, honest money lost to friction, precision and recall, each equal to the simulation's ground truth to the
+rupiah. Moving the step-up threshold up lowers friction and raises fraud loss, never the other way round.
+
+Proof: `RiskReportTest`
+
+## Everything at once
+
+### Random histories of faults
+
+What happened: any mix of the failures above, in any order: retried checkouts, duplicated, lost and reordered
+webhooks, refunds while the provider is down or commits then times out, workers dying after the provider acted,
+racing settlement runs, chargebacks around payout, every bank fault, re-imported and re-issued statements, slow
+periods, abandoned checkouts, step-ups and blocks, and a provider charging a blocked payment.
+
+Expected: once everything settles, all twelve money rules hold (`GET /api/operations/invariants`): books balance
+against the bank and the open breaks to the cent, no capture paid out twice, nothing reconciled without a bank
+line, every unmatched line has a break, no bank entry booked twice, every landing proven, no blocked payment at the
+provider, no step-up started unconfirmed, no retry charged twice, refunds and payouts executed once.
+
+Proof: `MoneyInvariantPropertyTest` (50 random histories per run, with coverage checks), `ChaosRunTest`,
+`./scripts/scenarios.sh chaos` against the packaged app in CI
+
+## Telling the shop
+
+### The shop's server is down, slow, or answers with a redirect
+
+Expected: every failed delivery (an error status, a redirect, which is never followed, or no answer within the read
+timeout) is retried with exponential backoff and jitter; after the last attempt the event is `FAILED`, still listed
+and redeliverable; a shop that processed a delivery but answered too late gets it again and recognizes the event id.
+
+Proof: `MerchantWebhookTest.shouldRetryErrorsRedirectsAndSlowAnswersWithBackoffUntilTheShopAnswers`,
+`shouldGiveUpAfterTheLastAttemptAndSendAgainWhenAsked`
+
+### Deliveries arrive out of order
+
+Expected: events are numbered per payment; when a retried event arrives after a newer one, the shop (as the guide
+asks, and as the simulated shop does) ignores it as stale and keeps the newer state.
+
+Proof: `MerchantWebhookTest.shouldAnnounceRefundsAndPutOvertakenDeliveriesBackInOrder`
+
+### A change rolls back, or the shop has no endpoint
+
+Expected: an event is written in the transaction of its change, so a rolled-back change has no event; without an
+endpoint, events are recorded as `SKIPPED` and listed; switching the endpoint off skips what was waiting.
+
+Proof: `MerchantWebhookTest.shouldWriteAnEventOnlyWithItsChangeAndKeepItReadableWithoutAnEndpoint`; the money rule
+`PAYMENT_CHANGES_ANNOUNCED` (`shouldCatchAChangeTheShopWasNeverTold`, and after every random history of faults)
+
+### The signing secret is rotated
+
+Expected: for 24 hours deliveries carry signatures with both secrets, so a shop verifies before and after it switches;
+after the overlap only the new secret signs. A forged delivery does not verify.
+
+Proof: `MerchantWebhookTest.shouldKeepVerifyingThroughASecretRotation`, the `merchant-webhooks` scenario
+
+### A shop points its webhook at our own network
+
+Expected: only https URLs whose host resolves to public addresses are accepted, at registration and before every
+delivery: loopback, private, link-local (cloud metadata), carrier-grade NAT, multicast and reserved addresses are
+refused, also inside IPv4-mapped and NAT64 IPv6 addresses; credentials in the URL are refused; redirects are never
+followed. Next to a real provider, the application refuses to start with private addresses allowed.
+
+Proof: `DestinationGuardTest`, `MerchantWebhookTest.shouldRefuseEndpointsThatAreNotSafeToSendTo`,
+`ProviderConfigurationGuard`
 
 ## Operations and evidence
 

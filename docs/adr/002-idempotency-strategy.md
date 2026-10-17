@@ -1,6 +1,6 @@
 # 002 Idempotency Strategy
 
-Status: extended. Every mutating operator call also accepts an optional `Idempotency-Key`; the first response is stored and replayed (see `IdempotencyFilter`). Refund creation now requires a key stored with the refund.
+Status: extended. Every mutating operator call also accepts an optional `Idempotency-Key`; the first response is stored and replayed (see `IdempotencyFilter`). Refund creation now requires a key stored with the refund. Key generation, canonical fingerprints, scope and expiry on every path, including calls to the provider, are in [024](024-idempotency-keys-end-to-end.md).
 
 ## Context
 

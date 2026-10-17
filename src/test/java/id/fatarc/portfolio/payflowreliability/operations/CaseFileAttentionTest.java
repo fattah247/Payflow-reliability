@@ -31,7 +31,7 @@ class CaseFileAttentionTest {
 
     private static ReviewCaseView openCase(PaymentIntent intent, ReviewReason reason) {
         return new ReviewCaseView(UUID.randomUUID(), reason, ReviewStatus.OPEN, "PROVIDER_TRANSACTION", "tx-1",
-                intent.getId(), intent.getState(), "details", "operator:ops-ana", Instant.now(),
+                intent.getId(), intent.getState(), "details", "operator:ops-ana", Instant.now(), Instant.now().plusSeconds(14400), false,
                 Set.of(ReviewAction.ACKNOWLEDGE), Set.of(), null, null, null, null, null, null, null, null, null);
     }
 
@@ -40,7 +40,7 @@ class CaseFileAttentionTest {
         PaymentCaseFile.Attention attention = OperationsService.attention(settledPayment(), List.of(), List.of(), List.of());
 
         assertThat(attention.needsAction()).isFalse();
-        assertThat(attention.waitingOn()).isEqualTo("Provider settlement report for reconciliation.");
+        assertThat(attention.waitingOn()).isEqualTo("Provider settlement report row, and a bank credit landing its payout (three-way reconciliation).");
     }
 
     @Test
@@ -53,7 +53,7 @@ class CaseFileAttentionTest {
         assertThat(attention.needsAction()).isTrue();
         assertThat(attention.openReviewCaseIds()).hasSize(2);
         assertThat(attention.waitingOn())
-                .startsWith("Provider settlement report for reconciliation.")
+                .startsWith("Provider settlement report row, and a bank credit landing its payout (three-way reconciliation).")
                 .contains("2 open review reason(s)", "AMOUNT_MISMATCH", "SETTLEMENT_DATE_MISMATCH");
     }
 

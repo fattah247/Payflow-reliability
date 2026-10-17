@@ -4,6 +4,8 @@ import id.fatarc.portfolio.payflowreliability.audit.AggregateType;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import id.fatarc.portfolio.payflowreliability.outbox.CommandStatus;
 import id.fatarc.portfolio.payflowreliability.outbox.OutboxCommand;
 import id.fatarc.portfolio.payflowreliability.outbox.OutboxCommandRepository;
@@ -78,6 +80,12 @@ public class ReviewWorkflowService {
     @Transactional(readOnly = true)
     public List<ReviewCaseView> list(Collection<ReviewStatus> statuses, ReviewReason reason, UUID paymentIntentId) {
         return describe(reviewService.findCases(statuses, reason, paymentIntentId));
+    }
+
+    @Transactional(readOnly = true)
+    public PageSlice<ReviewCaseView> page(Collection<ReviewStatus> statuses, ReviewReason reason, UUID paymentIntentId,
+                                          PageCursor after, Integer limit) {
+        return reviewService.pageCases(statuses, reason, paymentIntentId, after, limit).map(this::describe);
     }
 
     @Transactional(readOnly = true)
@@ -176,7 +184,7 @@ public class ReviewWorkflowService {
             PaymentState paymentState = intent == null ? null : intent.getState();
             Set<ReviewAction> allowed = reviewCase.getStatus() == ReviewStatus.OPEN
                     ? allowedActions(related) : EnumSet.noneOf(ReviewAction.class);
-            return ReviewCaseView.from(reviewCase, paymentState, allowed);
+            return ReviewCaseView.from(reviewCase, paymentState, allowed, clock.instant());
         }).toList();
     }
 

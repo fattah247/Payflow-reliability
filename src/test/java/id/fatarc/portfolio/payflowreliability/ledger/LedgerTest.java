@@ -43,8 +43,8 @@ class LedgerTest extends IntegrationTest {
         assertThat(jdbcTemplate.queryForList(
                 "select journal_id from ledger_postings group by journal_id having sum(amount) <> 0", UUID.class)).isEmpty();
         assertThat(ledgerJournalRepository.findAll()).extracting("journalType").containsExactlyInAnyOrder(
-                JournalType.CAPTURE, JournalType.REFUND, JournalType.PAYOUT, JournalType.CAPTURE, JournalType.REVERSAL,
-                JournalType.CAPTURE);
+                JournalType.CAPTURE, JournalType.REFUND, JournalType.PAYOUT, JournalType.PAYOUT_IN_TRANSIT, JournalType.CAPTURE,
+                JournalType.REVERSAL, JournalType.CAPTURE);
 
         InvariantReport report = ledgerInvariantService.check();
         assertThat(report.violations()).isEmpty();
@@ -92,11 +92,15 @@ class LedgerTest extends IntegrationTest {
         InvariantReport report = ledgerInvariantService.check();
 
         assertThat(report.healthy()).isFalse();
-        assertThat(report.violations()).singleElement().satisfies(violation -> {
-            assertThat(violation.kind()).isEqualTo("MERCHANT_BALANCE_MISMATCH");
-            assertThat(violation.expected()).isEqualByComparingTo("1000");
-            assertThat(violation.actual()).isEqualByComparingTo("600");
-        });
+        // Seen from both sides: the merchant balance no longer matches, and the payouts-due account holds a
+        // commitment no settlement batch explains.
+        assertThat(report.violations()).extracting("kind")
+                .containsExactlyInAnyOrder("MERCHANT_BALANCE_MISMATCH", "PAYOUTS_DUE_MISMATCH");
+        assertThat(report.violations()).filteredOn(violation -> violation.kind().equals("MERCHANT_BALANCE_MISMATCH"))
+                .singleElement().satisfies(violation -> {
+                    assertThat(violation.expected()).isEqualByComparingTo("1000");
+                    assertThat(violation.actual()).isEqualByComparingTo("600");
+                });
     }
 
     @Test
@@ -135,5 +139,17 @@ class LedgerTest extends IntegrationTest {
         mockMvc.perform(as(OPS_ANA_KEY, get("/api/ledger/invariants")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.healthy").value(true));
+    }
+
+    @Test
+    void shouldDetectBankCashThatNoBankLineExplains() {
+        // Cash and suspense booked around the import: no statement line, no break.
+        new TransactionTemplate(transactionManager).executeWithoutResult(status ->
+                ledgerService.bankUnmatched(UUID.randomUUID(), "IDR", new BigDecimal("250")));
+
+        InvariantReport report = ledgerInvariantService.check();
+
+        assertThat(report.violations()).extracting("kind")
+                .containsExactlyInAnyOrder("BANK_CASH_MISMATCH", "SUSPENSE_MISMATCH");
     }
 }

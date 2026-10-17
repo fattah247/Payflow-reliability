@@ -17,8 +17,11 @@ public record InvariantReport(Instant checkedAt, int journalsChecked, int mercha
     }
 
     /**
-     * @param kind UNBALANCED_JOURNAL (postings do not sum to zero) or MERCHANT_BALANCE_MISMATCH
-     *             (ledger balance differs from what payments, refunds, reversals and payouts imply)
+     * @param kind UNBALANCED_JOURNAL (postings do not sum to zero), MERCHANT_BALANCE_MISMATCH (ledger balance
+     *             differs from what payments, refunds, reversals and payouts imply), SETTLEMENT_MISMATCH (a payout
+     *             does not match what it settles), or a bank-leg kind: BANK_CASH_MISMATCH,
+     *             BANK_CREDITS_UNEXPLAINED, SUSPENSE_MISMATCH, SUSPENSE_LINE_WITHOUT_BREAK, PAYOUT_FEES_MISMATCH,
+     *             IN_TRANSIT_MISMATCH, PAYOUTS_DUE_MISMATCH, RECONCILED_WITHOUT_BANK_LINE
      */
     public record Violation(String kind, String merchantId, String currency, BigDecimal expected,
                             BigDecimal actual, String detail) {

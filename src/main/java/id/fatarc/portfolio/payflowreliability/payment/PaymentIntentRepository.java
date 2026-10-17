@@ -1,7 +1,9 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -12,7 +14,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UUID> {
+public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UUID>, JpaSpecificationExecutor<PaymentIntent> {
     /** Locked, so concurrent replays of one key are serialized (each writes to the payment's audit chain). */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from PaymentIntent p where p.merchantId = :merchantId and p.idempotencyKey = :key")
@@ -48,6 +50,14 @@ public interface PaymentIntentRepository extends JpaRepository<PaymentIntent, UU
                          @Param("checkedBefore") Instant checkedBefore, org.springframework.data.domain.Pageable page);
 
     long countByStateInAndUpdatedAtBefore(Collection<PaymentState> states, Instant updatedBefore);
+
+    /** Settled payments the provider's report has confirmed: reconciled as soon as their payout lands. */
+    @Query("""
+            select p.id from PaymentIntent p
+            where p.state = id.fatarc.portfolio.payflowreliability.payment.PaymentState.SETTLED
+              and p.providerReportMatchedAt is not null
+            order by p.id""")
+    List<UUID> findSettledWithProviderConfirmation();
 
     @Query("select p.state as state, count(p) as paymentCount from PaymentIntent p group by p.state")
     List<StateCount> countByState();

@@ -5,6 +5,7 @@ import id.fatarc.portfolio.payflowreliability.payment.dto.ProviderWebhookRequest
 import id.fatarc.portfolio.payflowreliability.provider.PaymentProviderClient;
 import id.fatarc.portfolio.payflowreliability.provider.ProviderPaymentStatus;
 import id.fatarc.portfolio.payflowreliability.provider.ProviderUnavailableException;
+import id.fatarc.portfolio.payflowreliability.risk.RiskService;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +39,7 @@ public class PaymentStatusSweeper {
 
     private final PaymentIntentRepository paymentIntentRepository;
     private final PaymentProviderClient providerClient;
+    private final RiskService riskService;
     private final ProviderWebhookService webhookService;
     private final AuditService auditService;
     private final MeterRegistry meterRegistry;
@@ -51,6 +53,7 @@ public class PaymentStatusSweeper {
 
     public PaymentStatusSweeper(PaymentIntentRepository paymentIntentRepository,
                                 PaymentProviderClient providerClient,
+                                RiskService riskService,
                                 ProviderWebhookService webhookService,
                                 AuditService auditService,
                                 MeterRegistry meterRegistry,
@@ -63,6 +66,7 @@ public class PaymentStatusSweeper {
                                 @Value("${payflow.sweeper.batch-size:50}") int batchSize) {
         this.paymentIntentRepository = paymentIntentRepository;
         this.providerClient = providerClient;
+        this.riskService = riskService;
         this.webhookService = webhookService;
         this.auditService = auditService;
         this.meterRegistry = meterRegistry;
@@ -88,7 +92,7 @@ public class PaymentStatusSweeper {
 
     public SweepReport runOnce(Duration stuckAfter) {
         Instant now = clock.instant();
-        int expired = expireNeverStarted(now);
+        int expired = expireNeverStarted(now) + riskService.expireUnconfirmed(null);
         List<UUID> stuck = transactions.execute(status -> paymentIntentRepository.findStuck(WAITING_ON_PROVIDER,
                 now.minus(stuckAfter), now.minus(recheckInterval), PageRequest.of(0, batchSize)));
         int recovered = 0;

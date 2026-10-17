@@ -44,6 +44,8 @@ class AlertRulesTest extends IntegrationTest {
     private String scrape() throws Exception {
         PaymentIntent intent = paidIntent("ORDER-ALERT-1", "1000");
         requestRefund(intent, "1000", "refund-alert-1");
+        paymentIntentService.cancel(startedIntent("ORDER-ALERT-2", "500").getId(),
+                id.fatarc.portfolio.payflowreliability.payment.CancellationReason.ABANDONED, AS_MERCHANT_A);
         drainOutbox();
         postWebhook("{}", "t=1,v1=00").andExpect(status().isUnauthorized());
         sweeper.runOnce();

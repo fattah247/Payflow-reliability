@@ -232,4 +232,59 @@ class ApiContractTest extends IntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("NOTHING_TO_SETTLE"));
     }
+
+    @Test
+    void shouldBoundListsFilterBankLinesAndKeepPersistenceDetailsOutOfResponses() throws Exception {
+        paidIntent("ORDER-LIST-1", "3000");
+        paidIntent("ORDER-LIST-2", "2000");
+        var batch = settle(MERCHANT_A);
+        landPayouts();
+        String reference = reload(batch).getPayoutReference();
+
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/lines").param("endToEndId", reference)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].endToEndId").value(reference))
+                .andExpect(jsonPath("$[0].matchStatus").value("MATCHED"));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/lines").param("endToEndId", reference).param("status", "SUSPENSE")))
+                .andExpect(jsonPath("$.length()").value(0));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/statements").param("limit", "1")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/settlements/batches").param("merchantId", MERCHANT_A).param("limit", "1")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].payoutStatus").value("LANDED"))
+                .andExpect(jsonPath("$[0].new").doesNotExist());
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/outbox").param("status", "SUCCEEDED").param("limit", "5")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+
+        for (String limit : new String[]{"0", "1001", "-3"}) {
+            mockMvc.perform(as(OPS_ANA_KEY, get("/api/bank/lines").param("limit", limit)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+        }
+    }
+
+    @Test
+    void shouldLetAMerchantFindItsOwnPaymentsByReferenceAfterLosingTheKey() throws Exception {
+        postIntent(merchantAKey, "lost-key-1", CREATE_BODY.replace("ORDER-9001", "ORDER-LOST")).andExpect(status().isCreated());
+        clock.advance(java.time.Duration.ofSeconds(1));
+        postIntent(merchantAKey, "fresh-key-2", CREATE_BODY.replace("ORDER-9001", "ORDER-LOST").replace("125000", "130000"))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(as(merchantAKey, get("/api/payment-intents").param("merchantReference", "ORDER-LOST")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].amount").value(130000.0))
+                .andExpect(jsonPath("$[1].amount").value(125000.0));
+        mockMvc.perform(as(merchantBKey, get("/api/payment-intents").param("merchantReference", "ORDER-LOST")
+                        .param("merchantId", MERCHANT_A)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0)); // merchant B searches only its own payments
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/payment-intents").param("merchantReference", "ORDER-LOST")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/payment-intents").param("merchantReference", "ORDER-LOST").param("merchantId", MERCHANT_A)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(2));
+        mockMvc.perform(get("/api/payment-intents").param("merchantReference", "ORDER-LOST")).andExpect(status().isUnauthorized());
+    }
 }

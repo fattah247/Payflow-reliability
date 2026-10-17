@@ -22,23 +22,31 @@ import java.util.List;
  *                       that day, and payouts we recorded for that day but missing from it are flagged
  * @param merchantId     optional narrower scope, for providers that report per merchant account: only that
  *                       merchant's payouts are expected in the report. Requires settlementDate.
+ * @param payouts        optional: the provider's payouts (gross, fee, net, value date), the provider's leg of the
+ *                       three-way match per batch. When given with a settlementDate, every payout we sent that day
+ *                       is expected in it.
  */
 public record ReconciliationReportRequest(
         LocalDate settlementDate,
         @Size(max = 100) String merchantId,
-        @NotNull @Size(max = 1000) List<@Valid @NotNull Row> rows
+        @NotNull @Size(max = 1000) List<@Valid @NotNull Row> rows,
+        @Size(max = 1000) List<@Valid @NotNull PayoutRow> payouts
 ) {
     public ReconciliationReportRequest(List<Row> rows) {
-        this(null, null, rows);
+        this(null, null, rows, null);
     }
 
     public ReconciliationReportRequest(LocalDate settlementDate, List<Row> rows) {
-        this(settlementDate, null, rows);
+        this(settlementDate, null, rows, null);
     }
 
-    @AssertTrue(message = "rows must not be empty unless settlementDate is given")
+    public ReconciliationReportRequest(LocalDate settlementDate, String merchantId, List<Row> rows) {
+        this(settlementDate, merchantId, rows, null);
+    }
+
+    @AssertTrue(message = "rows must not be empty unless settlementDate or payouts are given")
     public boolean isScoped() {
-        return rows == null || !rows.isEmpty() || settlementDate != null;
+        return rows == null || !rows.isEmpty() || settlementDate != null || (payouts != null && !payouts.isEmpty());
     }
 
     @AssertTrue(message = "merchantId narrows a dated report; give settlementDate too")
@@ -62,5 +70,21 @@ public record ReconciliationReportRequest(
                    LocalDate settlementDate) {
             this(providerTransactionId, amount, currency, providerStatus, settlementDate, null);
         }
+    }
+
+    /**
+     * One payout as the provider reports it.
+     *
+     * @param payoutReference the reference we gave the provider (and the bank transfer carries)
+     */
+    public record PayoutRow(
+            @NotBlank @Size(max = 35) String payoutReference,
+            @NotBlank @Size(max = 100) String providerPayoutId,
+            @NotNull @PositiveOrZero BigDecimal grossAmount,
+            @NotNull @PositiveOrZero BigDecimal feeAmount,
+            @NotNull @PositiveOrZero BigDecimal netAmount,
+            @NotBlank @Pattern(regexp = "[A-Z]{3}", message = "must be a 3-letter uppercase ISO currency code") String currency,
+            LocalDate valueDate
+    ) {
     }
 }

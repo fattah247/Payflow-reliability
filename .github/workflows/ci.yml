@@ -100,7 +100,9 @@ jobs:
       - name: Run every scenario
         run: |
           for scenario in idempotency duplicate-webhook amount-mismatch provider-outage lost-webhook \
-                          settlement reconciliation four-eyes security audit-trail; do
+                          settlement reconciliation four-eyes security audit-trail \
+                          outbound-key-crash bank-reconciliation fee-deduction missing-credit returned-payout \
+                          statement-reimport slow-but-up device-risk merchant-webhooks chaos; do
             ./scripts/scenarios.sh "$scenario"
           done
       - name: Run the walkthrough
@@ -121,3 +123,7 @@ jobs:
         run: >-
           docker run --rm -v "$PWD/ops/prometheus:/rules:ro" --entrypoint promtool prom/prometheus:v2.53.2
           check rules /rules/alerts.yml
+      - name: Unit-test Prometheus rules
+        run: >-
+          docker run --rm -v "$PWD/ops/prometheus:/rules:ro" --entrypoint promtool prom/prometheus:v2.53.2
+          test rules /rules/alerts.test.yml

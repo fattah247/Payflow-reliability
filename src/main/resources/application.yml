@@ -72,6 +72,8 @@ payflow:
     signature-tolerance: 5m
     connect-timeout: 2s
     read-timeout: 5s
+    # Never resend a call first dispatched longer ago than this: the provider may have forgotten its key.
+    key-resend-window: 23h
   provider-sim:
     enabled: ${PAYFLOW_PROVIDER_SIM_ENABLED:true}
     api-key: ${PAYFLOW_PROVIDER_API_KEY:sim_local_provider_key}
@@ -82,6 +84,93 @@ payflow:
     delivery-max-backoff: 5m
     fault-delay: 8s
     dispatch-interval: 1s
+    # How long the simulated provider remembers idempotency keys (real providers prune them, often after 24 h).
+    key-retention: 24h
+    # The provider's fee on each payout, deducted before it sends the net (basis points of the gross).
+    payout-fee-bps: 30
+    payout-value-days: 1
+    # While slow, the simulator waits this share of each declared latency (declared values still drive decisions).
+    latency-time-scale: 0.05
+  # The local stand-in for the bank holding the settlement account (statements in camt.053). Local only.
+  bank-sim:
+    enabled: ${PAYFLOW_BANK_SIM_ENABLED:true}
+    api-key: ${PAYFLOW_BANK_API_KEY:bank_local_statement_key}
+  bank:
+    # Empty base URL means the bank simulator served by this application.
+    base-url: ${PAYFLOW_BANK_BASE_URL:}
+    api-key: ${PAYFLOW_BANK_API_KEY:bank_local_statement_key}
+    statement-poll-interval: 1m
+    # The first statement number expected per account; coverage (which days are complete) counts from here.
+    first-statement-sequence: 1
+  # Notifications to shops (ADR 030, docs/merchant-webhooks.md): signed webhooks with retries, and an events list to catch up.
+  merchant-webhooks:
+    poll-interval: 1s
+    connect-timeout: 2s
+    read-timeout: 5s
+    # 30 s doubling to at most an hour apart, with jitter: 20 attempts span roughly 7 to 13 hours (a night's outage).
+    max-attempts: 20
+    base-backoff: 30s
+    max-backoff: 1h
+    lease: 30s
+    batch-size: 20
+    # After a rotation the previous secret keeps signing next to the new one for this long.
+    secret-rotation-overlap: 24h
+    # Local demos only: the merchant simulator listens on localhost. Refused at startup next to a real provider.
+    allow-private-addresses: ${PAYFLOW_MERCHANT_WEBHOOKS_ALLOW_PRIVATE:true}
+  # Simulated shops that receive webhooks (local only).
+  merchant-sim:
+    enabled: ${PAYFLOW_MERCHANT_SIM_ENABLED:true}
+  checkout:
+    # The checkout service level, measured inside the payment system: start to confirmed capture.
+    confirmation-slo: 10s
+    slo-objective: 0.95
+    abandonment-window: 15m
+  # The device-risk reference policy (ADR 028). Points come from the device's signals (LOW 1, MEDIUM 2, HIGH 3, as the
+  # device app weighs them), the amount and what is being bought. With amount and action points at zero it decides
+  # exactly like the app's own gate.
+  risk:
+    step-up-threshold: 2
+    block-threshold: 5
+    block-on-severe-signal: true
+    # IDR amounts from which one more point is added.
+    amount-steps: 1000000, 5000000
+    action-points:
+      PHYSICAL_GOODS: 0
+      DIGITAL_GOODS: 1
+      STORED_VALUE: 2
+    # Shops that send no device evidence (server-to-server) are not penalised by default.
+    missing-evidence-points: 0
+    confirmation-timeout: 10m
+    # Used only by the threshold sweep, when the data has no step-up outcome to observe. Assumptions, not data.
+    assumed-confirm-rate-legitimate: 0.85
+    assumed-confirm-rate-fraudulent: 0.25
+  # Simulated customers for local demos (ADR 027). Every value is a model assumption, not observed behaviour.
+  loadgen:
+    checkout:
+      enabled: ${PAYFLOW_LOADGEN_ENABLED:true}
+      customers: 40
+      amount-min: 50000
+      amount-max: 500000
+      patience-min: 2s
+      patience-max: 8s
+      abandon-probability: 0.5
+      max-attempts: 3
+      concurrency: 8
+      # While slow: customers with less patience than the page leave or reload; those who wait for the page but not
+      # for the payment answer press pay again (the retry an idempotency key must absorb).
+      slow-checkout-page: 4s
+      slow-pay: 7s
+    # Labelled customers for the device-risk gate: honest or fraudulent, known to the simulation only.
+    risk:
+      customers: 200
+      fraud-rate: 0.12
+      legitimate-confirm-rate: 0.85
+      fraudulent-confirm-rate: 0.25
+      concurrency: 8
+  reconciliation:
+    # A credit lands its payout only if valued no later than the provider's expected date plus this many days.
+    value-date-window-days: 2
+    three-way-interval: 5m
   workers:
     enabled: ${PAYFLOW_WORKERS_ENABLED:true}
   outbox:

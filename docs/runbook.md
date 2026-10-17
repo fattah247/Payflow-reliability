@@ -7,12 +7,20 @@ alert means, why it matters for money, and what to do. All endpoints need an ope
 General first steps for any payment-level problem:
 
 ```bash
+curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/worklist | jq '.items[] | {title, owner, dueAt, overdue, nextStep}'
 curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/summary | jq
+curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/money-at-risk | jq '.items[] | select(.count > 0)'
+curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/operations/invariants | jq '.rules[] | select(.holds | not)'
 curl -s -H "Authorization: Bearer $OPS_KEY" localhost:8080/api/payment-intents/<id>/case-file | jq '.attention'
 ```
 
-The case file shows the payment, provider events, provider calls (outbox), refunds, settlement items,
-ledger journals, review cases, whether the audit chain verifies, and the full timeline.
+The worklist is everything waiting for a person, most urgent first: who should act, the money, the due time, the next
+step and the exact calls that resolve each item (for a credit nobody could match, the payout it most likely belongs
+to). Money at risk says where money is waiting (past the SLO, abandoned, held, in breaks by age, awaiting a step-up,
+blocked today); the invariants say which money rule is broken and for which records. The case file shows the
+payment, what is known at each stage of its money and the evidence (`certainty`), its device-risk decision,
+provider events, provider calls (outbox), refunds, settlement items, ledger journals, review cases, whether the
+audit chain verifies, and the full timeline.
 
 ---
 
@@ -87,6 +95,100 @@ purpose: money is not returned while the provider contradicts the payment.
 client timeouts (`payflow.provider.connect-timeout`, `read-timeout`). Expect the
 `PayflowProviderCallOutcomeUnknown` alert next if it persists.
 
+<a id="reconciliation-breaks-overdue"></a>
+## PayflowReconciliationBreaksOverdue (page)
+
+**Meaning.** The ledger, the provider's report and the bank statement disagree about at least one payout, and
+the disagreement has been open longer than its window (24 h for missing, returned or refused payouts and
+statement conflicts, 48 h for unexplained or late credits and amount mismatches, 72 h for duplicates and
+provider report differences).
+
+**Why it matters.** Each break is money we cannot account for: a payout that left the provider and did not
+arrive, a credit nobody can explain (held in `bank_suspense`), or a provider report that contradicts our books.
+
+**Do.**
+1. `GET /api/reconciliation/breaks?status=OPEN` lists each break with its category, owner, amount, age and
+   `allowedActions`. `GET /api/reconciliation/three-way/batches/<batchId>` shows the three legs of a payout
+   side by side, with every check and whether it passed.
+2. By owner:
+   - **TREASURY** (`MISSING_CREDIT`, `UNMATCHED_CREDIT`, `UNMATCHED_DEBIT`, `DUPLICATE_CREDIT`, `LATE_CREDIT`,
+     `RETURNED_PAYOUT`, `STATEMENT_CONFLICT`): ask the bank. A late or misreferenced credit that the bank
+     confirms belongs to a payout: `POST /api/reconciliation/breaks/<id>/resolve` with
+     `{"action": "ASSIGN_TO_BATCH", "batchId": "...", "note": "..."}`. The amount is still checked.
+   - **PROVIDER_OPERATIONS** (`PROVIDER_REFUSED_PAYOUT`, `AMOUNT_MISMATCH`, `PROVIDER_PAYOUT_MISMATCH`,
+     `MISSING_FROM_PROVIDER_REPORT`, `UNKNOWN_PROVIDER_PAYOUT`): ask the provider, with the payout reference.
+3. Breaks that hold money in suspense cannot be acknowledged away: they close when the money is explained (a
+   matching bank line, a return, or an assignment). The others can be closed with `ACKNOWLEDGE` and a note
+   once the investigation is done outside the system.
+4. A missing credit that arrives later lands the payout automatically and closes the break.
+
+<a id="reconciliation-not-running"></a>
+## PayflowReconciliationNotRunning (ticket)
+
+**Meaning.** The scheduled three-way reconciliation (suspense retries, missing credits, payments ready to
+reconcile) has not completed for over 30 minutes.
+
+**Do.** Check that background workers are enabled and the database is reachable. Run it on demand:
+`POST /api/reconciliation/three-way/run` returns what it did. Until it runs, missing credits are not declared
+and payments whose payout landed stay SETTLED.
+
+<a id="bank-statements-not-arriving"></a>
+## PayflowBankStatementsNotArriving (ticket)
+
+**Meaning.** No bank statement has been imported for 36 hours. Banks deliver end-of-day statements daily.
+
+**Why it matters.** Without statements no payout can land, no credit can be declared missing (that needs every
+statement through the end of a payout's window), and suspense items cannot be explained.
+
+**Do.**
+1. `POST /api/bank/statements/pull` fetches and imports what the bank has; the response shows each statement's
+   outcome and how far coverage reaches (`coveredThrough`).
+2. If the bank feed is down, import files by hand: `POST /api/bank/statements` with the camt.053 file
+   (`Content-Type: application/xml`). Importing the same file twice is harmless.
+3. If statements arrive but coverage does not move, a statement in the sequence is missing: ask the bank for it.
+
+<a id="slow-but-up"></a>
+## PayflowSlowButUp (page)
+
+**Meaning.** Every health check reports UP, yet money is at risk: at least three payments have waited for the
+provider's confirmation longer than the checkout SLO (`payflow.checkout.confirmation-slo`, 10 s), or customers
+are abandoning checkout (three or more in ten minutes).
+
+**Why it matters.** Nothing is "down", so no availability alert fires, while sales are being lost and customers
+who are not sure they paid are about to try again. This is the alert for the provider being slow, not absent.
+
+**Do.**
+1. `GET /api/operations/summary` → `moneyAtRisk`: `PENDING_BEYOND_SLA` (count and amount waiting) and
+   `ABANDONED` (count, amount and amount per minute over the window).
+2. Check the provider's status page and the latency of its webhooks. If webhooks are delayed, the status sweeper
+   (`POST /api/operations/sweeps/payment-status?olderThanSeconds=60`) asks the provider directly.
+3. Watch `PayflowDuplicateCharge`: impatient customers retry, and only clients that reuse their idempotency key
+   are protected.
+4. Tell merchants: a payment page that does not load is costing them checkouts right now.
+
+<a id="checkout-slo-burn"></a>
+## PayflowCheckoutSloBurn (page)
+
+**Meaning.** The share of checkouts confirmed later than the SLO is using up the error budget fast: more than
+14.4 times the allowed rate over an hour, or 6 times over six hours (with a 95 % objective, 5 % may be slow).
+
+**Do.** Same first steps as PayflowSlowButUp. `payflow_payment_confirmation_seconds` (histogram, with the SLO as a
+bucket boundary) shows how slow; `payflow_payment_confirmations_total{within_slo}` shows how many.
+
+<a id="duplicate-charge"></a>
+## PayflowDuplicateCharge (page)
+
+**Meaning.** A merchant reference was captured more than once: a customer was charged twice for one checkout.
+
+**Why it matters.** The server deduplicates only requests that carry the same idempotency key. A duplicate means a
+client generated a new key for a retry (see [the client contract](idempotency-keys.md)).
+
+**Do.**
+1. `GET /api/operations/summary` → `moneyAtRisk.DUPLICATE_CHARGES` gives the count and the extra amount.
+2. Find the payments: same `merchantReference`, more than one captured (`GET /api/payment-intents/<id>` for each).
+3. Refund the extra charge (`POST /api/refunds/payment-intents/<id>` with its own key) and contact the merchant
+   about their client's key generation.
+
 <a id="payments-stuck"></a>
 ## PayflowPaymentsStuck (ticket)
 
@@ -154,3 +256,30 @@ calls `/approve` or `/reject-proposal`. The proposer cannot approve their own pr
 
 **Do.** The refresh reads the database: check database availability and the application log for
 "Could not refresh operational metrics". Check that the scheduler is running.
+
+<a id="merchant-webhooks-failing"></a>
+## PayflowMerchantWebhooksFailing (ticket)
+
+**Meaning.** Every delivery attempt for some events failed (20 attempts over roughly 7 to 13 hours by default), so those shops
+may not know a payment succeeded, failed or was refunded. The events are kept, readable and redeliverable.
+
+**Do.** See which shops and why:
+
+```bash
+curl -s -H "Authorization: Bearer $OPS_KEY" "localhost:8080/api/events?status=FAILED" | jq '.[] | {merchantId, type, paymentIntentId, attempts, lastStatusCode, lastError}'
+```
+
+`lastError` says what the shop's server did: an HTTP status (often 401 when the shop verifies with an old secret, 5xx
+when its server is broken), no answer within the read timeout, or a refused connection. Tell the shop; they can catch up
+from `GET /api/events` with their own key. Once their endpoint works, send each event again
+(`POST /api/events/{id}/redeliver`); the shop deduplicates by event id, so a copy it already has does no harm.
+
+<a id="merchant-notifications-delayed"></a>
+## PayflowMerchantNotificationsDelayed (ticket)
+
+**Meaning.** An event has waited over an hour to be delivered. Either one shop's endpoint has been failing for a while
+(retries back off up to an hour apart), or the sender is not running at all.
+
+**Do.** `GET /api/events?status=PENDING` and look at `merchantId`, `attempts` and `lastError`. Many shops at once, or
+`attempts` 0 everywhere, means the sender is stuck: check the application log and `POST /api/merchant-webhooks/run`
+(it reports what it attempted). One shop with growing attempts is the case above: tell the shop.

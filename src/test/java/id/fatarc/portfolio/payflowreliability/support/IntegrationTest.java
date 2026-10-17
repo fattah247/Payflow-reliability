@@ -5,6 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import id.fatarc.portfolio.payflowreliability.audit.AuditChainVerifier;
 import id.fatarc.portfolio.payflowreliability.audit.AuditEvent;
 import id.fatarc.portfolio.payflowreliability.audit.AuditEventRepository;
+import id.fatarc.portfolio.payflowreliability.bank.BankStatementImportService;
+import id.fatarc.portfolio.payflowreliability.bank.StatementImportResult;
+import id.fatarc.portfolio.payflowreliability.banksim.BankFaults;
+import id.fatarc.portfolio.payflowreliability.merchantsim.MerchantSimulator;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantEventRepository;
+import id.fatarc.portfolio.payflowreliability.notification.MerchantWebhookDispatcher;
+import id.fatarc.portfolio.payflowreliability.banksim.BankSimulator;
 import id.fatarc.portfolio.payflowreliability.common.WebhookSignatures;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerInvariantService;
 import id.fatarc.portfolio.payflowreliability.ledger.LedgerJournalRepository;
@@ -18,10 +25,16 @@ import id.fatarc.portfolio.payflowreliability.payment.*;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.ProviderWebhookRequest;
 import id.fatarc.portfolio.payflowreliability.providersim.ProviderSimulator;
+import id.fatarc.portfolio.payflowreliability.providersim.SimApiRequestRepository;
 import id.fatarc.portfolio.payflowreliability.providersim.SimFaults;
+import id.fatarc.portfolio.payflowreliability.providersim.SimLatency;
 import id.fatarc.portfolio.payflowreliability.providersim.SimOperationRepository;
 import id.fatarc.portfolio.payflowreliability.providersim.SimWebhookDispatcher;
 import id.fatarc.portfolio.payflowreliability.reconciliation.ReconciliationService;
+import id.fatarc.portfolio.payflowreliability.reconciliation.ThreeWayReconciliationService;
+import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.BreakStatus;
+import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.ReconciliationBreak;
+import id.fatarc.portfolio.payflowreliability.reconciliation.breaks.ReconciliationBreakRepository;
 import id.fatarc.portfolio.payflowreliability.reconciliation.dto.ReconciliationReportRequest;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequest;
 import id.fatarc.portfolio.payflowreliability.refund.RefundRequestRepository;
@@ -33,7 +46,9 @@ import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
 import id.fatarc.portfolio.payflowreliability.review.ReviewStatus;
 import id.fatarc.portfolio.payflowreliability.review.ReviewWorkflowService;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
+import id.fatarc.portfolio.payflowreliability.settlement.PayoutStatus;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatch;
+import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatchRepository;
 import id.fatarc.portfolio.payflowreliability.settlement.SettlementService;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,6 +68,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -69,7 +85,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 @ActiveProfiles("test")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
-@Import(TestClockConfig.class)
+@Import({TestClockConfig.class, TestProviderClientConfig.class})
 public abstract class IntegrationTest {
     protected static final String MERCHANT_A = "merchant-a";
     protected static final String MERCHANT_B = "merchant-b";
@@ -82,10 +98,12 @@ public abstract class IntegrationTest {
     protected static final String WEBHOOK_SECRET = "whsec_test_current";
     protected static final String PREVIOUS_WEBHOOK_SECRET = "whsec_test_previous";
 
-    private static final List<String> TABLES = List.of("settlement_batch_items", "settlement_batches", "ledger_postings",
+    private static final List<String> TABLES = List.of("reconciliation_breaks", "provider_payout_reports",
+            "bank_statement_lines", "bank_statements", "bank_accounts", "sim_payout_items", "sim_payouts", "bank_sim_entries",
+            "bank_sim_statements", "bank_sim_accounts", "settlement_batch_items", "settlement_batches", "ledger_postings",
             "ledger_journals", "outbox_commands", "provider_events", "refund_requests", "review_cases",
-            "payment_transactions", "audit_events", "idempotency_records", "payment_intents", "merchant_api_keys",
-            "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments");
+            "payment_transactions", "audit_events", "idempotency_records", "risk_decisions", "merchant_events",
+            "merchant_webhook_endpoints", "payment_intents", "merchant_api_keys", "merchants", "sim_webhook_deliveries", "sim_operations", "sim_payments", "sim_api_requests");
 
     @Autowired protected MockMvc mockMvc;
     @Autowired protected ObjectMapper objectMapper;
@@ -117,14 +135,30 @@ public abstract class IntegrationTest {
     @Autowired protected SimWebhookDispatcher webhookDispatcher;
     @Autowired protected SimOperationRepository simOperationRepository;
     @Autowired protected SimFaults simFaults;
+    @Autowired protected SimApiRequestRepository simApiRequestRepository;
+    @Autowired protected CrashableProviderClient providerClient;
+    @Autowired protected BankSimulator bankSimulator;
+    @Autowired protected BankFaults bankFaults;
+    @Autowired protected SimLatency simLatency;
+    @Autowired protected BankStatementImportService bankStatementImportService;
+    @Autowired protected ThreeWayReconciliationService threeWayReconciliationService;
+    @Autowired protected ReconciliationBreakRepository breakRepository;
+    @Autowired protected SettlementBatchRepository settlementBatchRepository;
+    @Autowired protected MerchantSimulator merchantSimulator;
+    @Autowired protected MerchantWebhookDispatcher merchantWebhookDispatcher;
+    @Autowired protected MerchantEventRepository merchantEventRepository;
 
     protected String merchantAKey;
     protected String merchantBKey;
 
     @BeforeEach
-    void resetWorld() {
+    protected void resetWorld() {
         clock.reset();
         simFaults.clear();
+        simLatency.recover();
+        bankFaults.clear();
+        merchantSimulator.reset();
+        providerClient.reset();
         truncateAll();
         merchantAKey = merchantService.register(new RegisterMerchantRequest(MERCHANT_A, "Merchant A"), OPS_ANA).apiKey().apiKey();
         merchantBKey = merchantService.register(new RegisterMerchantRequest(MERCHANT_B, "Merchant B"), OPS_ANA).apiKey().apiKey();
@@ -211,9 +245,42 @@ public abstract class IntegrationTest {
         return reload(intent);
     }
 
-    /** A settled payment matched by a clean provider report row. */
+    // ---- the bank leg ---------------------------------------------------------------------------
+
+    /**
+     * What happens after a batch is created, compressed: the provider executes the payout (outbox), the bank books
+     * the credit, the bank closes business days through the value date, and the statements are imported.
+     */
+    protected List<StatementImportResult> landPayouts() {
+        drainOutbox();
+        for (SettlementBatch batch : settlementBatchRepository.findByPayoutStatusInOrderByCreatedAtAsc(
+                java.util.EnumSet.of(PayoutStatus.IN_TRANSIT))) {
+            bankSimulator.closeDays(batch.getCurrency(), batch.getExpectedValueDate());
+        }
+        return importStatements();
+    }
+
+    /** Closes the bank's business days through {@code date}, issuing one statement per day. */
+    protected void closeBankDays(String currency, LocalDate date) {
+        bankSimulator.closeDays(currency, date);
+    }
+
+    protected List<StatementImportResult> importStatements() {
+        return bankStatementImportService.pull(OPS_ANA.name());
+    }
+
+    protected SettlementBatch reload(SettlementBatch batch) {
+        return settlementBatchRepository.findById(batch.getId()).orElseThrow();
+    }
+
+    protected List<ReconciliationBreak> openBreaks() {
+        return breakRepository.findByStatusOrderByOpenedAtAsc(BreakStatus.OPEN);
+    }
+
+    /** A settled payment matched by a clean provider report row, whose payout has landed in the bank. */
     protected PaymentIntent reconciledIntent(String reference, String amount) {
         PaymentIntent intent = settledIntent(reference, amount);
+        landPayouts();
         PaymentTransaction transaction = transactionOf(intent);
         reconciliationService.importReport(new ReconciliationReportRequest(List.of(new ReconciliationReportRequest.Row(
                 transaction.getProviderTransactionId(), new BigDecimal(amount), transaction.getCurrency(),

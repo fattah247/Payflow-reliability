@@ -17,7 +17,10 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Two-sided: every reported row gets a verdict, and payouts the provider did not report are flagged. */
+/**
+ * Two-sided: every reported row gets a verdict, and payouts the provider did not report are flagged. A clean row
+ * is the provider's half of the evidence; RECONCILED also needs the bank to show the payout landed.
+ */
 class ReconciliationTest extends IntegrationTest {
 
     private ReconciliationReportResponse importRows(ReconciliationReportRequest.Row... rows) {
@@ -35,17 +38,39 @@ class ReconciliationTest extends IntegrationTest {
     }
 
     @Test
-    void shouldReconcileMatchingSettledTransaction() {
+    void shouldReconcileOnlyOnceTheReportMatchesAndThePayoutHasLanded() {
         PaymentIntent intent = settledIntent("ORDER-3001", "64000");
 
         ReconciliationReportResponse result = importRows(rowFor(intent, "64000"));
 
         assertThat(result.mismatchCount()).isZero();
+        assertThat(result.reconciledCount()).isZero();
+        assertThat(result.awaitingBankCount()).isEqualTo(1);
+        assertThat(result.rows()).singleElement().extracting(ReconciliationReportResponse.RowResult::outcome)
+                .isEqualTo(RowOutcome.MATCHED_AWAITING_BANK);
+        assertThat(stateOf(intent)).as("the provider's word is half the evidence").isEqualTo(PaymentState.SETTLED);
+
+        landPayouts();
+
+        assertThat(stateOf(intent)).as("the bank credit completes it").isEqualTo(PaymentState.RECONCILED);
+        assertThat(auditFor(intent)).last().satisfies(event -> {
+            assertThat(event.getActor()).isEqualTo("operator:ops-ana");
+            assertThat(event.getReason()).contains("Three-way match");
+        });
+    }
+
+    @Test
+    void shouldReconcileAtOnceWhenThePayoutLandedBeforeTheReportArrived() {
+        PaymentIntent intent = settledIntent("ORDER-3014", "64000");
+        landPayouts();
+        assertThat(stateOf(intent)).as("the bank alone is not enough either").isEqualTo(PaymentState.SETTLED);
+
+        ReconciliationReportResponse result = importRows(rowFor(intent, "64000"));
+
         assertThat(result.reconciledCount()).isEqualTo(1);
         assertThat(result.rows()).singleElement().extracting(ReconciliationReportResponse.RowResult::outcome)
                 .isEqualTo(RowOutcome.RECONCILED);
         assertThat(stateOf(intent)).isEqualTo(PaymentState.RECONCILED);
-        assertThat(auditFor(intent)).last().satisfies(event -> assertThat(event.getActor()).isEqualTo("operator:ops-ana"));
     }
 
     @Test
@@ -72,6 +97,7 @@ class ReconciliationTest extends IntegrationTest {
         PaymentIntent reported = paidIntent("ORDER-3003", "1000");
         PaymentIntent unreported = paidIntent("ORDER-3004", "2000");
         settle(MERCHANT_A);
+        landPayouts();
         LocalDate payoutDate = transactionOf(reported).getSettledOn();
 
         ReconciliationReportResponse result = reconciliationService.importReport(
@@ -119,6 +145,7 @@ class ReconciliationTest extends IntegrationTest {
     @Test
     void shouldBeSafeToImportTheSameReportTwice() {
         PaymentIntent matched = settledIntent("ORDER-3006", "1000");
+        landPayouts();
         ReconciliationReportRequest.Row good = rowFor(matched, "1000");
         ReconciliationReportRequest.Row unknown = row("provider-tx-unknown", "5000", null);
 
@@ -147,6 +174,7 @@ class ReconciliationTest extends IntegrationTest {
     @Test
     void shouldCompareRefundedAmountsWhenTheProviderReportsThem() {
         PaymentIntent intent = settledIntent("ORDER-3008", "4000");
+        landPayouts();
         requestRefund(reload(intent), "1500", "refund-3008");
         drainOutbox();
         PaymentTransaction transaction = transactionOf(intent);
@@ -180,6 +208,7 @@ class ReconciliationTest extends IntegrationTest {
     @Test
     void shouldFlagADuplicateRowInTheSameReport() {
         PaymentIntent intent = settledIntent("ORDER-3010", "3000");
+        landPayouts();
         ReconciliationReportRequest.Row row = rowFor(intent, "3000");
 
         ReconciliationReportResponse result = importRows(row, row);

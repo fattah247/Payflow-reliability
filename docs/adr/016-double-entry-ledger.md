@@ -1,5 +1,7 @@
 # 016 Double-Entry Ledger with Invariant Checks
 
+Status: extended by [025](025-bank-statement-three-way-reconciliation.md): payouts in transit, bank cash, suspense, provider fees and bank charges, and the bank-leg checks.
+
 ## Context
 
 Amounts lived on payments, refunds and batches, with no single place that says how much is owed to whom, and no way to detect that two of them disagree.

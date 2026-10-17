@@ -1,6 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.provider;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -15,6 +16,17 @@ public interface PaymentProviderClient {
     Optional<ProviderResult> findRefund(String idempotencyKey);
 
     Optional<ProviderResult> findReversal(String idempotencyKey);
+
+    /**
+     * Asks the provider to pay a settlement batch into the platform's settlement account.
+     *
+     * @param reference              what the provider puts on the bank transfer, so the credit can be matched
+     * @param providerTransactionIds the captures the payout settles, so the provider's report can list them
+     */
+    ProviderResult payout(String idempotencyKey, String reference, String merchantId, BigDecimal amount,
+                          String currency, List<String> providerTransactionIds);
+
+    Optional<ProviderResult> findPayout(String idempotencyKey);
 
     /**
      * @return empty when the provider has no record of the payment

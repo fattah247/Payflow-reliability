@@ -5,7 +5,12 @@
 #   ./scripts/scenarios.sh <scenario>
 #
 # Scenarios: idempotency, duplicate-webhook, amount-mismatch, provider-outage, lost-webhook, settlement,
-#            reconciliation, four-eyes, security, audit-trail
+#            reconciliation, four-eyes, security, audit-trail,
+#            outbound-key-crash, bank-reconciliation, fee-deduction, missing-credit, returned-payout,
+#            statement-reimport, slow-but-up, device-risk, chaos, merchant-webhooks
+#
+# Simulated customers (slow-but-up, device-risk) and the chaos run are seeded: the same seed plays the same
+# customers and the same faults. Their parameters are model assumptions, never real data.
 #
 # Every run registers a fresh merchant and uses fresh ids. Exits non-zero if any check fails.
 set -euo pipefail
@@ -332,14 +337,16 @@ scenario_settlement() {
 }
 
 scenario_reconciliation() {
-  header "Two-sided reconciliation" \
-    "Every reported row gets a verdict, and payouts the provider did not report are flagged."
+  header "Provider report against the ledger" \
+    "Every reported row gets a verdict; even a clean match waits for the bank before it counts as reconciled."
 
   local matched mismatched unreported
   matched=$(paid "ORDER-A-$RUN_ID" 1000)
   mismatched=$(paid "ORDER-B-$RUN_ID" 2000)
   unreported=$(paid "ORDER-C-$RUN_ID" 3000)
-  as_ops request POST "/api/settlements/batches?merchantId=$MERCHANT_ID" ""
+  quiet_outbox
+  local batch
+  batch=$(settle_now)
   local tx_a tx_b tx_c today
   tx_a=$(provider_tx "$matched")
   tx_b=$(provider_tx "$mismatched")
@@ -379,9 +386,17 @@ print(" ".join(r["outcome"] for r in rows))' "$ours"
   as_ops request GET "/api/review-cases" ""
   local opened_by_first
   opened_by_first=$(( $(size) - cases_before ))
+  local after_report
+  after_report=$(states "$matched" "$mismatched" "$unreported")
+  show "payment states (A B C)" "$after_report (the provider's word is not the bank's)"
+
+  batch_view "$batch"
+  bank_catch_up "$(pick provider.expectedValueDate)"
+  batch_view "$batch"
+  show "the bank credits the payout" "$(pick payoutStatus)"
 
   as_ops request POST /api/reconciliation/reports "$report"
-  printf '   same report imported again\n'
+  printf '   same report imported again, after the bank\n'
   local second_outcomes
   second_outcomes=$(outcomes 2>/dev/null)
   printf '     %s\n' "$second_outcomes"
@@ -390,19 +405,16 @@ print(" ".join(r["outcome"] for r in rows))' "$ours"
   opened_by_second=$(( $(size) - cases_before - opened_by_first ))
   show "review cases opened" "$opened_by_first by first import, $opened_by_second by second"
 
-  local states=""
-  local payment
-  for payment in "$matched" "$mismatched" "$unreported"; do
-    as_ops request GET "/api/payment-intents/$payment" ""
-    states="$states $(pick state)"
-  done
-  show "payment states (A B C)" "${states# }"
+  local after_bank
+  after_bank=$(states "$matched" "$mismatched" "$unreported")
+  show "payment states (A B C)" "$after_bank"
 
   checks
   check "each row gets its own verdict" "$first_outcomes" \
-    "RECONCILED MISMATCH NOT_FOUND_LOCALLY DUPLICATE_ROW MISSING_FROM_REPORT"
+    "MATCHED_AWAITING_BANK MISMATCH NOT_FOUND_LOCALLY DUPLICATE_ROW MISSING_FROM_REPORT"
   check "a payout the provider did not report is flagged" "$(printf '%s' "$first_outcomes" | grep -c MISSING_FROM_REPORT)" "1"
-  check "only the clean match is reconciled" "${states# }" "RECONCILED SETTLED SETTLED"
+  check "a clean match waits for the bank" "$after_report" "SETTLED SETTLED SETTLED"
+  check "only the clean match is reconciled, once the bank confirms" "$after_bank" "RECONCILED SETTLED SETTLED"
   check "re-import is safe" "$second_outcomes" \
     "ALREADY_RECONCILED MISMATCH NOT_FOUND_LOCALLY DUPLICATE_ROW MISSING_FROM_REPORT"
   check "re-import opens no new review cases" "$opened_by_first $opened_by_second" "4 0"
@@ -568,13 +580,695 @@ print(" ".join(sorted({e["requestId"] for e in case["timeline"]})))' "$WORK_DIR/
   check "the hash chain verifies" "$valid" "True"
 }
 
+scenario_outbound_key_crash() {
+  header "The provider acts, then the call times out" \
+    "One business operation, one outbound key: the worker cannot know its call worked, and money still moves once."
+
+  local payment
+  payment=$(paid "ORDER-$RUN_ID" 200000)
+  quiet_outbox
+  provider_fault REFUND TIMEOUT_AFTER_COMMIT 1
+  as_merchant request POST "/api/refunds/payment-intents/$payment" \
+    '{"amount": 50000, "reason": "damaged item"}' "Idempotency-Key: client-refund-$RUN_ID"
+  local refund
+  refund=$(pick id)
+  show "refund of 50000 requested" "client key client-refund-$RUN_ID"
+  show "the provider" "refunds the customer, then answers too late"
+  wait_for_refund "$refund" COMPLETED 45 || true
+  local refund_status
+  refund_status=$(pick status)
+
+  as_ops request GET "/api/payment-intents/$payment/case-file" ""
+  local key attempts journals
+  key=$(json "[c['idempotencyKey'] for c in b['providerCalls'] if c['commandType'] == 'REFUND'][0]")
+  attempts=$(json "[c['attempts'] for c in b['providerCalls'] if c['commandType'] == 'REFUND'][0]")
+  journals=$(json "sum(1 for j in b['ledger'] if j['type'] == 'REFUND')")
+  show "outbound key, derived once" "$key"
+  show "worker attempts" "$attempts (after the timeout it looked the key up)"
+  as_provider request GET "/provider-sim/v1/requests?idempotencyKey=$key" ""
+  local refund_log refund_applied
+  refund_log=$(json "', '.join(r['outcome'] for r in b)")
+  refund_applied=$(json "sum(1 for r in b if r['outcome'] == 'APPLIED')")
+  show "provider's log for that key" "$refund_log"
+  as_provider request GET "/provider-sim/v1/payments/$payment" ""
+  local refunded
+  refunded=$(money "$(pick refundedAmount)")
+  show "refunded at the provider" "$refunded IDR; refund journals in the ledger: $journals"
+
+  quiet_outbox
+  provider_fault PAYOUT TIMEOUT_AFTER_COMMIT 1
+  local batch
+  batch=$(settle_now)
+  batch_view "$batch"
+  local payout_status net
+  payout_status=$(pick payoutStatus)
+  net=$(money "$(pick provider.net)")
+  as_provider request GET "/provider-sim/v1/requests?idempotencyKey=payout-$batch" ""
+  local payout_log payout_applied
+  payout_log=$(json "', '.join(r['outcome'] for r in b)")
+  payout_applied=$(json "sum(1 for r in b if r['outcome'] == 'APPLIED')")
+  show "payout of the remaining 150000" "same fault: the provider pays, then times out"
+  show "outbound key" "payout-$batch"
+  show "provider's log for that key" "$payout_log"
+  show "payout" "$payout_status, net $net IDR sent once"
+
+  checks
+  check "the refund completes" "$refund_status" "COMPLETED"
+  check "the key comes from the refund, not the attempt" "$key" "refund-$refund"
+  check "the provider applied the refund once" "$refund_applied $refunded $journals" "1 50000 1"
+  check "the provider paid out once, under payout-<batch>" "$payout_applied" "1"
+  check "the payout is in transit, sent once" "$payout_status" "IN_TRANSIT"
+}
+
+scenario_bank_reconciliation() {
+  header "Three-way reconciliation: ledger, provider, bank" \
+    "A payout lands only on a bank credit matching reference, amount and value date; only then is a payment reconciled."
+
+  local a b c
+  a=$(paid "ORDER-A-$RUN_ID" 100000)
+  b=$(paid "ORDER-B-$RUN_ID" 250000)
+  c=$(paid "ORDER-C-$RUN_ID" 400000)
+  show "captured through the provider" "100000 + 250000 + 400000 IDR"
+  quiet_outbox
+  local batch
+  batch=$(settle_now)
+  batch_view "$batch"
+  local reference value_date
+  reference=$(pick payoutReference)
+  value_date=$(pick provider.expectedValueDate)
+  show "payout sent (ledger)" "$(money "$(pick ledger.batchTotal)") IDR, reference $reference"
+  show "provider accepted" "fee $(money "$(pick provider.fee)"), net $(money "$(pick provider.net)"), value date $value_date"
+
+  provider_report
+  local after_report
+  after_report=$(states "$a" "$b" "$c")
+  show "provider report imported" "payments $after_report"
+
+  bank_catch_up "$(plus_days "$value_date" -1)"
+  batch_view "$batch"
+  local before_credit
+  before_credit=$(pick payoutStatus)
+  show "statements to the day before" "no credit: payout $before_credit"
+
+  bank_catch_up "$value_date"
+  batch_view "$batch"
+  local landed all_checks
+  landed=$(pick payoutStatus)
+  all_checks=$(json "all(c['passed'] for c in b['checks'] if c['passed'] is not None)")
+  show "bank statement for $value_date" "credit found: payout $landed"
+  printf '%s' "$BODY" | python3 -c '
+import json, sys
+batch = json.load(sys.stdin)
+import re
+for line in batch["bank"]:
+    print("     bank line: received %s, charges %s, value %s, %s" % (int(line["received"]), int(line["charges"]),
+                                                                  line["valueDate"], line["status"]))
+for check in batch["checks"]:
+    mark = {True: "yes", False: "NO", None: "--"}[check["passed"]]
+    detail = re.sub(r"\.00\b", "", check["detail"])
+    if check["name"] in ("provider accepted the payout", "bank credit carries the payout reference"):
+        detail = ""
+    print("     %-3s  %-44s %s" % (mark, check["name"].replace("ledger: gross = received + provider fee + bank charges",
+                                                              "ledger: gross = received + fees"), detail))'
+  three_way
+  local after_bank open
+  after_bank=$(states "$a" "$b" "$c")
+  as_ops request GET "/api/reconciliation/breaks?status=OPEN&batchId=$batch" ""
+  open=$(size)
+  show "payments after the bank" "$after_bank"
+  show "open breaks for this payout" "$open"
+
+  checks
+  check "the provider's report alone reconciles nothing" "$after_report" "SETTLED SETTLED SETTLED"
+  check "without a bank credit the payout stays in transit" "$before_credit" "IN_TRANSIT"
+  check "the matched credit lands the payout" "$landed" "LANDED"
+  check "reference, amount, value date and fees all agree" "$all_checks" "True"
+  check "only now are the payments reconciled" "$after_bank" "RECONCILED RECONCILED RECONCILED"
+  check "nothing left to explain" "$open" "0"
+}
+
+scenario_fee_deduction() {
+  header "Fees on both sides of the transfer" \
+    "Provider fee and bank charge are each their own ledger line, and gross - fees = cash received, to the cent."
+
+  paid "ORDER-$RUN_ID" 500000 > /dev/null
+  quiet_outbox
+  bank_fault NET_OF_FEES '"amount": 6500'
+  local batch
+  batch=$(settle_now)
+  batch_view "$batch"
+  local value_date gross fee net
+  value_date=$(pick provider.expectedValueDate)
+  gross=$(money "$(pick ledger.batchTotal)")
+  fee=$(money "$(pick provider.fee)")
+  net=$(money "$(pick provider.net)")
+  show "payout (gross)" "$gross IDR"
+  show "provider fee (30 bps), net sent" "$fee, $net"
+  show "the bank" "credits the transfer minus a 6500 charge"
+  bank_catch_up "$value_date"
+  batch_view "$batch"
+  local status received charges equation
+  status=$(pick payoutStatus)
+  received=$(money "$(pick bank.0.received)")
+  charges=$(money "$(pick bank.0.charges)")
+  equation=$(json "[c['detail'] for c in b['checks'] if c['name'].startswith('ledger: gross')][0]")
+  show "bank line" "received $received, charges $charges: payout $status"
+
+  as_ops request GET "/api/ledger/journals?reference=$batch" ""
+  printf '%s' "$BODY" | python3 -c '
+import json, sys
+for journal in json.load(sys.stdin):
+    if journal["type"] in ("PAYOUT_IN_TRANSIT", "PAYOUT_LANDED"):
+        print("     %s" % journal["type"])
+        for posting in journal["postings"]:
+            amount = posting["amount"]
+            side = "debit " if amount > 0 else "credit"
+            print("       %s %-22s %12s" % (side, posting["account"], "{:,.2f}".format(abs(amount))))'
+  local landed_lines
+  landed_lines=$(json "' '.join(p['account'] for j in b if j['type'] == 'PAYOUT_LANDED' for p in j['postings'])")
+  show "ledger: gross = received + fees" "$equation"
+
+  checks
+  check "the provider's fee is 30 bps of the gross" "$fee $net" "1500 498500"
+  check "a credit net of a bank charge still lands" "$status $received $charges" "LANDED 492000 6500"
+  check "cash, provider fee and bank charge are separate lines" "$landed_lines" "bank_cash provider_fees bank_charges payouts_in_transit"
+  check "gross = received + provider fee + bank charge" "$equation" "500000.00 = 492000.00 + 1500.00 + 6500.00"
+}
+
+scenario_missing_credit() {
+  header "The provider says it paid; the bank never credits" \
+    "Missing only once every statement through the value-date window is in; then a break with an owner and a deadline."
+
+  local payment
+  payment=$(paid "ORDER-$RUN_ID" 300000)
+  quiet_outbox
+  bank_fault DROP_CREDIT
+  local batch
+  batch=$(settle_now)
+  batch_view "$batch"
+  local value_date net
+  value_date=$(pick provider.expectedValueDate)
+  net=$(money "$(pick provider.net)")
+  show "provider" "paid out $net IDR, value date $value_date"
+  show "the bank" "never books the credit"
+
+  bank_catch_up "$value_date"
+  batch_view "$batch"
+  local inside_window
+  inside_window=$(pick payoutStatus)
+  show "statements through $value_date" "no credit yet: $inside_window (late credits are allowed)"
+
+  bank_catch_up "$(plus_days "$value_date" 2)"
+  batch_view "$batch"
+  local status reason
+  status=$(pick payoutStatus)
+  reason=$(pick brokenReason)
+  show "statements through $(plus_days "$value_date" 2)" "window closed: $status ($reason)"
+  as_ops request GET "/api/reconciliation/breaks?status=OPEN&batchId=$batch" ""
+  local category owner amount due
+  category=$(pick 0.category)
+  owner=$(pick 0.owner)
+  amount=$(money "$(pick 0.amount)")
+  due=$(pick 0.dueAt)
+  show "break" "$category, owner $owner, $amount IDR, due $due"
+  as_ops request GET "/api/operations/money-at-risk?merchantId=$MERCHANT_ID" ""
+  local at_risk
+  at_risk=$(json "[(i['count'], str(int(i['amount'].get('IDR', 0)))) for i in b['items'] if i['kind'] == 'BREAKS_OPEN_UNDER_1_DAY'][0]")
+  show "money at risk (open breaks, < 1 day)" "$at_risk"
+  local state
+  state=$(states "$payment")
+  show "payment" "$state"
+
+  checks
+  check "inside the window the payout is only late" "$inside_window" "IN_TRANSIT"
+  check "after the window it is broken, credit missing" "$status $reason" "BROKEN MISSING_CREDIT"
+  check "the break says what, who and how much" "$category $owner $amount" "MISSING_CREDIT TREASURY $net"
+  check "the money at risk shows it" "$at_risk" "(1, '$net')"
+  check "the payment is not reconciled" "$state" "SETTLED"
+  check "every money rule still holds" "$(rule_holds UNMATCHED_MONEY_HAS_A_BREAK) $(rule_holds BOOKS_BALANCE)" "True True"
+}
+
+scenario_returned_payout() {
+  header "The bank credits the payout, then sends it back" \
+    "A returned transfer breaks the payout and puts the money back where the ledger can see it."
+
+  local payment
+  payment=$(paid "ORDER-$RUN_ID" 200000)
+  quiet_outbox
+  bank_fault RETURN_PAYOUT '"days": 1'
+  local batch
+  batch=$(settle_now)
+  batch_view "$batch"
+  local value_date net reference
+  value_date=$(pick provider.expectedValueDate)
+  net=$(money "$(pick provider.net)")
+  reference=$(pick payoutReference)
+  show "provider" "paid out $net IDR, value date $value_date"
+
+  bank_catch_up "$value_date"
+  batch_view "$batch"
+  local first
+  first=$(pick payoutStatus)
+  show "statement for $value_date" "credit arrives: $first"
+
+  bank_catch_up "$(plus_days "$value_date" 1)"
+  batch_view "$batch"
+  local status reason returned lines
+  status=$(pick payoutStatus)
+  reason=$(pick brokenReason)
+  returned=$(money "$(pick bank.1.received)")
+  lines=$(json "', '.join('%s %s' % (l['status'], int(l['received'])) for l in b['bank'])")
+  show "statement for $(plus_days "$value_date" 1)" "the bank returns it: $status ($reason)"
+  show "bank lines for the payout" "$lines"
+  as_ops request GET "/api/reconciliation/breaks?status=OPEN&batchId=$batch" ""
+  local category owner
+  category=$(pick 0.category)
+  owner=$(pick 0.owner)
+  show "break" "$category, owner $owner"
+  as_ops request GET "/api/bank/lines?endToEndId=$reference&status=RETURN" ""
+  local return_line
+  return_line=$(pick 0.id)
+  as_ops request GET "/api/ledger/journals?reference=$return_line" ""
+  local journal
+  journal=$(json "'; '.join('%s: ' % j['type'] + ', '.join('%s %s %s' % ('debit' if p['amount'] > 0 else 'credit', p['account'], int(abs(p['amount']))) for p in j['postings']) for j in b)")
+  show "ledger" "$journal"
+  local state
+  state=$(states "$payment")
+  show "payment" "$state"
+
+  checks
+  check "the credit first lands the payout" "$first" "LANDED"
+  check "the return breaks it" "$status $reason" "BROKEN RETURNED"
+  check "both bank lines are explained" "$lines" "MATCHED $net, RETURN -$net"
+  check "the money is the provider's to send again" "$journal" \
+    "PAYOUT_RETURNED: debit provider_receivable $net, credit bank_cash $net"
+  check "someone owns the follow-up" "$category" "RETURNED_PAYOUT"
+  check "the payment is not reconciled" "$state" "SETTLED"
+  check "the books still balance" "$(rule_holds BOOKS_BALANCE)" "True"
+}
+
+scenario_statement_reimport() {
+  header "The same statement, again and again" \
+    "Statements imported twice, re-sent by the bank, or re-issued under a new number never book a credit twice."
+
+  paid "ORDER-$RUN_ID" 150000 > /dev/null
+  quiet_outbox
+  local batch
+  batch=$(settle_now)
+  batch_view "$batch"
+  local value_date reference
+  value_date=$(pick provider.expectedValueDate)
+  reference=$(pick payoutReference)
+  bank_catch_up "$value_date"
+  batch_view "$batch"
+  local statement status
+  statement=$(pick bank.0.statementId)
+  status=$(pick payoutStatus)
+  show "statement $statement" "imported: payout $status"
+
+  as_bank request GET "/bank-sim/v1/statements/$statement" ""
+  printf '%s' "$BODY" > "$WORK_DIR/statement.xml"
+  local again=""
+  local i
+  for i in 1 2; do
+    curl -sS -X POST "$BASE_URL/api/bank/statements" -H "Authorization: Bearer $OPS_KEY" -H 'Content-Type: application/xml' \
+      --data-binary @"$WORK_DIR/statement.xml" > "$WORK_DIR/again-$i.json"
+    again="$again $(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("%s/%s" % (r["outcome"], r["newLines"]))' "$WORK_DIR/again-$i.json")"
+  done
+  show "imported by hand, twice more" "${again# } (outcome/new lines)"
+
+  bank_fault RESEND_STATEMENT
+  close_bank_through "$(plus_days "$value_date" 1)"
+  pull_statements
+  local resent
+  resent=$(json "' '.join(sorted(set(r['outcome'] for r in b)))")
+  show "the bank re-sends a statement" "pull: ${resent:-nothing new}"
+
+  # Same entries, new statement id and number (ids stay within camt.053's 35 characters).
+  python3 - "$WORK_DIR/statement.xml" > "$WORK_DIR/reissued.xml" <<'PY'
+import re, sys, time
+xml = open(sys.argv[1]).read()
+statement_id = re.search(r"<Stmt>\s*<Id>([^<]+)</Id>", xml).group(1)
+xml = xml.replace(statement_id, "%s-R%d" % (statement_id, int(time.time()) % 100000))
+print(re.sub(r"<ElctrncSeqNb>\d+</ElctrncSeqNb>", "<ElctrncSeqNb>%d</ElctrncSeqNb>" % (900000 + int(time.time()) % 90000), xml, count=1))
+PY
+  curl -sS -X POST "$BASE_URL/api/bank/statements" -H "Authorization: Bearer $OPS_KEY" -H 'Content-Type: application/xml' \
+    --data-binary @"$WORK_DIR/reissued.xml" > "$WORK_DIR/reissued.json"
+  local reissued copy_id
+  reissued=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("%s/%s" % (r["outcome"], r["newLines"]))' "$WORK_DIR/reissued.json")
+  copy_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["statementId"])' "$WORK_DIR/reissued.json")
+  show "the bank re-issues it, new number" "$copy_id: $reissued"
+  as_ops request GET "/api/reconciliation/breaks?status=OPEN&category=STATEMENT_CONFLICT" ""
+  local conflict owner
+  conflict=$(json "[x['detail'] for x in b if x['statementId'] == '$copy_id'][0]")
+  owner=$(json "[x['owner'] for x in b if x['statementId'] == '$copy_id'][0]")
+  show "break (owner $owner)" "$conflict"
+
+  as_ops request GET "/api/bank/lines?endToEndId=$reference" ""
+  local booked
+  booked=$(size)
+  as_ops request GET "/api/ledger/journals?reference=$batch" ""
+  local landings
+  landings=$(json "sum(1 for j in b if j['type'] == 'PAYOUT_LANDED')")
+  show "bank lines for this payout" "$booked"
+  show "landing journals for the payout" "$landings"
+
+  checks
+  check "the first import lands the payout" "$status" "LANDED"
+  check "re-imports book nothing" "${again# }" "ALREADY_IMPORTED/0 ALREADY_IMPORTED/0"
+  check "a re-issued copy books nothing and opens a break" "$reissued $(printf '%s' "$conflict" | grep -c 'repeats')" "IMPORTED/0 1"
+  check "one bank line, one landing" "$booked $landings" "1 1"
+  check "every bank entry is booked once" "$(rule_holds BANK_ENTRY_BOOKED_ONCE)" "True"
+}
+
+scenario_slow_but_up() {
+  header "The provider is slow, and every health check passes" \
+    "Seeded customers through the real API: what slowness costs in money, with zero duplicate charges."
+  trap 'as_provider request DELETE /provider-sim/v1/latency "" > /dev/null 2>&1; rm -rf "$WORK_DIR"' EXIT
+
+  checkout_run() {
+    as_ops request POST /api/simulations/checkout-runs \
+      "{\"seed\": 42, \"phase\": \"$1\", \"merchantApiKey\": \"$MERCHANT_KEY\", \"providerSlow\": $2, \"holdWebhooks\": $3, \"customers\": 40}"
+  }
+  checkout_run normal false null
+  local normal_paid normal_left normal_retries
+  normal_paid=$(pick paid.count)
+  normal_left=$(pick abandoned.count)
+  normal_retries=$(pick retries)
+  deliver_webhooks
+  show "normal provider, 40 customers" "$normal_paid paid, $normal_left left, $normal_retries retries"
+
+  checkout_run slow true true
+  local paid_count paid_amount left left_amount retries absorbed duplicates
+  paid_count=$(pick paid.count)
+  paid_amount=$(money "$(pick paid.amount)")
+  left=$(pick abandoned.count)
+  left_amount=$(money "$(pick abandoned.amount)")
+  retries=$(pick retries)
+  absorbed=$(pick retriesAbsorbed)
+  duplicates=$(pick duplicateCharges.count)
+  show "slow provider, 40 more customers" "$paid_count paid ($paid_amount IDR), $left left ($left_amount IDR)"
+  show "" "$retries retries, $absorbed answered by the idempotency key, $duplicates duplicate charges"
+  printf '   (simulated customers: seed 42, parameters in payflow.loadgen.checkout.*; not real behaviour)\n'
+
+  sleep 11
+  as_ops request GET "/api/operations/money-at-risk?merchantId=$MERCHANT_ID" ""
+  local pending abandoned per_minute dup_measured
+  pending=$(json "[(i['count'], str(int(i['amount'].get('IDR', 0)))) for i in b['items'] if i['kind'] == 'PENDING_BEYOND_SLA'][0]")
+  abandoned=$(json "[(i['count'], str(int(i['amount'].get('IDR', 0)))) for i in b['items'] if i['kind'] == 'ABANDONED'][0]")
+  per_minute=$(json "[str(int(i['perMinute'].get('IDR', 0))) for i in b['items'] if i['kind'] == 'ABANDONED'][0]")
+  dup_measured=$(json "[i['count'] for i in b['items'] if i['kind'] == 'DUPLICATE_CHARGES'][0]")
+  anonymous request GET /actuator/health ""
+  local health
+  health=$(pick status)
+  printf '\n   measured by the payment system, 11 s later\n'
+  show "past the 10 s confirmation SLO" "$pending (count, IDR)"
+  show "abandoned in the last 15 minutes" "$abandoned (count, IDR), $per_minute IDR per minute"
+  show "duplicate charges" "$dup_measured"
+  show "health" "$health"
+
+  checkout_run recovered false null
+  deliver_webhooks
+  local i
+  for i in $(seq 1 20); do
+    as_ops request GET "/api/operations/money-at-risk?merchantId=$MERCHANT_ID" ""
+    [ "$(json "[i['count'] for i in b['items'] if i['kind'] == 'PENDING_BEYOND_SLA'][0]")" = "0" ] && break
+    deliver_webhooks
+    sleep 0.5
+  done
+  local after
+  after=$(json "[i['count'] for i in b['items'] if i['kind'] == 'PENDING_BEYOND_SLA'][0]")
+  show "provider recovers" "held confirmations arrive: $after past the SLO"
+
+  checks
+  check "a fast provider loses nobody" "$normal_paid" "40"
+  check "slowness costs real checkouts" "$([ "$left" -gt 0 ] && echo yes)" "yes"
+  check "the system measures what the customers did" "$abandoned" "($left, '$left_amount')"
+  check "paid but unconfirmed is money at risk" "$pending" "($paid_count, '$paid_amount')"
+  check "every retry reused its key; nobody charged twice" "$absorbed $duplicates $dup_measured" "$retries 0 0"
+  check "and the health check says UP throughout" "$health" "UP"
+  check "recovery clears the backlog" "$after" "0"
+}
+
+scenario_device_risk() {
+  header "Device risk as money" \
+    "Step-ups wait for the customer, blocks never reach the provider, and every threshold has a price in money."
+
+  local rooted='{"deviceKeyId": "device-7", "level": "LOW", "simulated": true, "stepUpKeyAvailable": true,
+    "signals": [{"id": "root_package", "category": "ROOT", "severity": "HIGH", "source": "DEVICE_CHECK"}]}'
+  local emulator='{"deviceKeyId": "device-8", "simulated": true, "stepUpKeyAvailable": true,
+    "signals": [{"id": "emulator_fingerprint", "category": "EMULATOR", "severity": "MEDIUM", "source": "DEVICE_CHECK"}]}'
+  as_merchant request POST /api/payment-intents \
+    "{\"merchantReference\": \"ROOTED-$RUN_ID\", \"amount\": 120000, \"currency\": \"IDR\", \"action\": \"DIGITAL_GOODS\", \"riskEvidence\": $rooted}" \
+    "Idempotency-Key: key-ROOTED-$RUN_ID"
+  local blocked blocked_state
+  blocked=$(pick id)
+  blocked_state=$(pick state)
+  start_payment "$blocked"
+  local blocked_start="$STATUS $(pick code)"
+  as_ops request GET "/api/risk/decisions/$blocked" ""
+  show "rooted phone (claims LOW)" "$blocked_state by $(pick rule), $(pick totalPoints) points, recomputed level $(pick deviceLevel)"
+  show "shop tries to start it" "HTTP $blocked_start"
+
+  as_merchant request POST /api/payment-intents \
+    "{\"merchantReference\": \"EMU-$RUN_ID\", \"amount\": 80000, \"currency\": \"IDR\", \"riskEvidence\": $emulator}" \
+    "Idempotency-Key: key-EMU-$RUN_ID"
+  local held held_state method
+  held=$(pick id)
+  held_state=$(pick state)
+  method=$(pick requiredConfirmation)
+  start_payment "$held"
+  local held_start="$STATUS $(pick code)"
+  as_merchant request POST "/api/payment-intents/$held/confirm" "{\"method\": \"$method\"}"
+  start_payment "$held"
+  local confirmed_start="$STATUS $(pick state)"
+  show "emulator (one MEDIUM signal)" "$held_state, confirm with $method"
+  show "shop tries to start it" "HTTP $held_start"
+  show "customer confirms with $method" "start: HTTP $confirmed_start"
+
+  onboard_merchant "merchant-traffic-$RUN_ID"
+  as_ops request POST /api/simulations/risk-runs \
+    "{\"seed\": 42, \"phase\": \"risk\", \"merchantApiKey\": \"$MERCHANT_KEY\", \"customers\": 200}"
+  printf '%s' "$BODY" > "$WORK_DIR/truth.json"
+  deliver_webhooks
+  as_ops request GET "/api/risk/report?merchantId=$MERCHANT_ID" ""
+  printf '%s' "$BODY" > "$WORK_DIR/report.json"
+  as_ops request GET "/api/risk/threshold-sweep?parameter=STEP_UP&from=1&to=6&merchantId=$MERCHANT_ID" ""
+  printf '%s' "$BODY" > "$WORK_DIR/sweep.json"
+  printf '\n   200 labelled customers (seed 42; fraud share, devices and confirm rates are model assumptions)\n'
+  python3 - "$WORK_DIR/truth.json" "$WORK_DIR/report.json" "$WORK_DIR/sweep.json" <<'PY'
+import json, sys
+truth, report, sweep = (json.load(open(path)) for path in sys.argv[1:4])
+def t(tally):
+    return "%3d  %13s" % (tally["count"], "{:,}".format(int(tally["amount"])))
+print("     %-26s %-18s %s" % ("", "honest", "fraud"))
+for what in ("allowed", "stepped up, confirmed", "stepped up, not confirmed", "blocked"):
+    zero = {"count": 0, "amount": 0}
+    print("     %-26s %-18s %s" % (what, t(truth["legitimateBy"].get(what, zero)), t(truth["fraudBy"].get(what, zero))))
+print()
+print("     measured from decisions + labels")
+print("       fraud stopped            %s" % t(report["fraudStopped"]))
+print("       fraud loss               %s" % t(report["fraudLoss"]))
+print("       honest lost to friction  %s" % t(report["legitimateLostToFriction"]))
+print("       precision %.3f   recall %.3f" % (report["precision"], report["recall"]))
+print()
+print("     step-up threshold    flagged    fraud loss      friction   precision  recall")
+for row in sweep["rows"]:
+    print("       %s %-12d %7d  %12s  %12s   %9s  %6s" % ("->" if row["current"] else "  ", row["value"], row["steppedUp"] + row["blocked"],
+          "{:,}".format(int(row["fraudLoss"])), "{:,}".format(int(row["legitimateLostToFriction"])),
+          "%.3f" % row["precision"] if row["precision"] is not None else "-", "%.3f" % row["recall"] if row["recall"] is not None else "-"))
+print("       (rows other than the current one are expected values: re-decided from stored points)")
+PY
+  local agree monotone
+  agree=$(python3 - "$WORK_DIR/truth.json" "$WORK_DIR/report.json" <<'PY'
+import json, sys
+truth, report = (json.load(open(path)) for path in sys.argv[1:3])
+def tally(by, *keys):
+    rows = [by[k] for k in keys if k in by]
+    return (sum(r["count"] for r in rows), sum(int(r["amount"]) for r in rows))
+same = (tally(truth["fraudBy"], "blocked", "stepped up, not confirmed") == (report["fraudStopped"]["count"], int(report["fraudStopped"]["amount"]))
+        and tally(truth["fraudBy"], "allowed", "stepped up, confirmed") == (report["fraudLoss"]["count"], int(report["fraudLoss"]["amount"]))
+        and tally(truth["legitimateBy"], "blocked", "stepped up, not confirmed")
+            == (report["legitimateLostToFriction"]["count"], int(report["legitimateLostToFriction"]["amount"])))
+print(same)
+PY
+)
+  monotone=$(python3 -c '
+import json, sys
+rows = json.load(open(sys.argv[1]))["rows"]
+print(all(b["fraudLoss"] >= a["fraudLoss"] and b["legitimateLostToFriction"] <= a["legitimateLostToFriction"] for a, b in zip(rows, rows[1:]))
+      and rows[-1]["fraudLoss"] > rows[0]["fraudLoss"])' "$WORK_DIR/sweep.json")
+
+  checks
+  check "a high-severity signal blocks, whatever the device claims" "$blocked_state $blocked_start" "BLOCKED 422 PAYMENT_BLOCKED"
+  check "a step-up holds the payment until confirmed" "$held_state $held_start" "REQUIRES_CONFIRMATION 409 STEP_UP_REQUIRED"
+  check "once confirmed it starts like any other" "$confirmed_start" "200 PENDING"
+  check "measured fraud and friction equal the ground truth" "$agree" "True"
+  check "a higher threshold trades friction for fraud loss" "$monotone" "True"
+  check "no blocked payment reached the provider" "$(rule_holds BLOCKED_NEVER_REACHES_THE_PROVIDER)" "True"
+  check "no step-up started unconfirmed" "$(rule_holds STEP_UP_CONFIRMED_BEFORE_CAPTURE)" "True"
+}
+
+scenario_chaos() {
+  header "Chaos: a seeded sequence of faults against the running app" \
+    "Lost and doubled webhooks, provider timeouts, racing payouts, bank faults, slowness, device risk: the money rules hold."
+
+  quiet_outbox
+  as_ops request POST /api/simulations/chaos-runs "{\"seed\": 42, \"steps\": 150, \"merchantApiKey\": \"$MERCHANT_KEY\"}"
+  printf '%s' "$BODY" > "$WORK_DIR/chaos.json"
+  python3 - "$WORK_DIR/chaos.json" <<'PY'
+import json, sys
+run = json.load(open(sys.argv[1]))
+import textwrap
+def line(label, counts):
+    text = ", ".join("%s %s" % (k.lower(), v) for k, v in counts.items()) or "none"
+    wrapped = textwrap.wrap(text, 84) or [""]
+    print("   %-20s %s" % (label, wrapped[0]))
+    for rest in wrapped[1:]:
+        print("   %-20s %s" % ("", rest))
+print("   seed %s, %s steps" % (run["seed"], run["steps"]))
+line("actions", run["actions"])
+line("faults injected", run["faults"])
+line("payments end", run["payments"])
+line("payouts end", run["payouts"])
+line("breaks", run["breaks"])
+print()
+print("   money rules after everything settled")
+for rule in run["invariants"]["rules"]:
+    print("     %-36s %s" % (rule["name"], "holds" if rule["holds"] else "BROKEN: " + "; ".join(rule["violations"][:3])))
+PY
+  local rules
+  rules=$(python3 -c 'import json,sys; print(" ".join(r["name"] for r in json.load(open(sys.argv[1]))["invariants"]["rules"]))' "$WORK_DIR/chaos.json")
+
+  checks
+  local rule
+  for rule in $rules; do
+    check "$rule" "$(python3 -c 'import json,sys; print([r["holds"] for r in json.load(open(sys.argv[1]))["invariants"]["rules"] if r["name"] == sys.argv[2]][0])' "$WORK_DIR/chaos.json" "$rule")" "True"
+  done
+  check "and across the whole system, right now" "$(as_ops request GET /api/operations/invariants ""; pick allHold)" "true"
+}
+
+scenario_merchant_webhooks() {
+  header "Telling the shop: signed webhooks, retries, order and catch-up" \
+    "Every change reaches the shop once and in order, even when its server fails, answers late or changes its secret."
+
+  local shop="shop-$RUN_ID" sim="/merchant-sim/v1/shops/shop-$RUN_ID"
+  as_merchant request PUT /api/webhook-endpoint "{\"url\": \"$BASE_URL$sim/webhooks\"}"
+  local registered="$STATUS" secret
+  secret=$(pick secret)
+  anonymous request PUT "$sim/secret" "{\"secret\": \"$secret\"}"
+  show "shop registers its endpoint" "HTTP $registered, secret ${secret:0:10}... shown once"
+
+  local payment
+  payment=$(paid "WH-$RUN_ID" 150000)
+  wait_for_shop "$sim" "payment" "$payment" 3
+  section "a payment, as the shop received it"
+  shop_deliveries "$sim"
+
+  section "the shop is down for one delivery while a refund completes"
+  anonymous request POST "$sim/faults" '{"failNext": 1, "status": 503}'
+  as_merchant request POST "/api/refunds/payment-intents/$payment" '{"amount": 50000, "reason": "Customer request"}' \
+    "Idempotency-Key: refund-WH-$RUN_ID"
+  local refund
+  refund=$(pick id)
+  wait_for_refund "$refund" COMPLETED >/dev/null
+  wait_for_shop "$sim" "refund" "$refund" 1
+  as_merchant request GET "/api/events?paymentIntentId=$payment&type=refund.created" ""
+  local created_event
+  created_event=$(pick 0.id)
+  show "refund.created" "$(pick 0.status), attempt $(pick 0.attempts): $(pick 0.lastError)"
+  as_merchant request POST "/api/events/$created_event/redeliver" ""
+  wait_for_deliveries "$sim" 6
+  shop_deliveries "$sim" refund.
+
+  section "the shop's signing secret is rotated"
+  as_merchant request POST /api/webhook-endpoint/rotate-secret ""
+  local next_secret until
+  next_secret=$(pick secret)
+  until=$(pick previousSecretSignsUntil)
+  show "new secret" "${next_secret:0:10}...; the previous one also signs until $until"
+  create_payment "WH-ROT-$RUN_ID" 1000
+  local rotation_payment
+  rotation_payment=$(pick id)
+  wait_for_deliveries "$sim" 7
+  show "shop still on the old secret" "$(last_delivery "$sim")"
+  anonymous request PUT "$sim/secret" "{\"secret\": \"$next_secret\"}"
+  start_payment "$rotation_payment"
+  wait_for_deliveries "$sim" 8
+  show "after the shop switches" "$(last_delivery "$sim")"
+  local forged_status
+  forged_status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL$sim/webhooks" -H 'Content-Type: application/json' \
+    -H "Payflow-Signature: t=$(date +%s),v1=0000000000000000000000000000000000000000000000000000000000000000" \
+    --data-binary "{\"id\": \"forged-$RUN_ID\", \"type\": \"payment.updated\", \"sequence\": 99, \"data\": {\"paymentIntentId\": \"$payment\", \"state\": \"REFUNDED\"}}")
+  show "a forged delivery (wrong signature)" "HTTP $forged_status"
+
+  section "the events list: the record a shop catches up from"
+  as_merchant request GET "/api/events?paymentIntentId=$payment" ""
+  json '"\n".join("%-16s seq %-2s %-10s %-10s attempts %s" % (e["type"], e["sequence"], e["state"], e["status"], e["attempts"]) for e in b)' \
+    | sed 's/^/   /'
+  local all_delivered
+  all_delivered=$(json 'all(e["status"] == "DELIVERED" for e in b)')
+
+  anonymous request GET "$sim" ""
+  printf '%s' "$BODY" > "$WORK_DIR/shop.json"
+  checks
+  check "the shop applied the payment's latest state" \
+    "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["payments"][sys.argv[2]]; print(p["state"], p["sequence"])' "$WORK_DIR/shop.json" "$payment")" "SUCCESS 3"
+  check "the shop applied the completed refund" \
+    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["refunds"][sys.argv[2]]["state"])' "$WORK_DIR/shop.json" "$refund")" "COMPLETED"
+  check "the late copy of refund.created was ignored as stale" \
+    "$(python3 -c 'import json,sys; print([d["outcome"] for d in json.load(open(sys.argv[1]))["deliveries"] if d["type"] == "refund.created"])' "$WORK_DIR/shop.json")" "['FAULT', 'STALE']"
+  check "during the rotation overlap deliveries carry both signatures" \
+    "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["deliveries"]; print(d[6]["signatures"], d[6]["outcome"], d[7]["outcome"])' "$WORK_DIR/shop.json")" "2 APPLIED APPLIED"
+  check "a forged delivery is refused by the shop" "$forged_status" "401"
+  check "every event of the payment delivered" "$all_delivered" "True"
+  check "every payment change announced (money rule)" "$(rule_holds PAYMENT_CHANGES_ANNOUNCED)" "True"
+}
+
+# wait_for_shop SIM KIND ID SEQUENCE  -> until the simulated shop has applied an event of that payment or refund
+wait_for_shop() {
+  local sim="$1" kind="$2" id="$3" sequence="$4" i
+  for ((i = 0; i < 40; i++)); do
+    anonymous request GET "$sim" ""
+    if [ "$(json "len([d for d in b['deliveries'] if d['outcome'] == 'APPLIED' and (d['paymentIntentId'] == '$id' if '$kind' == 'payment' else True) and d['type'].startswith('$kind')])")" -ge "$sequence" ] 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+}
+
+# wait_for_deliveries SIM COUNT  -> until the simulated shop has received COUNT deliveries
+wait_for_deliveries() {
+  local sim="$1" count="$2" i
+  for ((i = 0; i < 40; i++)); do
+    anonymous request GET "$sim" ""
+    if [ "$(json 'len(b["deliveries"])')" -ge "$count" ]; then return 0; fi
+    sleep 0.5
+  done
+}
+
+# shop_deliveries SIM [TYPE_PREFIX]  -> what the simulated shop received, in arrival order
+shop_deliveries() {
+  anonymous request GET "$1" ""
+  json '"\n".join("%-16s seq %-2s %-10s signatures %s  %s" % (d["type"], d["sequence"], d["state"], d["signatures"], d["outcome"]) for d in b["deliveries"] if d["type"].startswith("'"${2:-}"'"))' \
+    | sed 's/^/   /'
+}
+
+# last_delivery SIM  -> the shop's most recent delivery, on one line
+last_delivery() {
+  anonymous request GET "$1" ""
+  json '"%s seq %s, %s signature(s), %s" % (b["deliveries"][-1]["type"], b["deliveries"][-1]["sequence"], b["deliveries"][-1]["signatures"], b["deliveries"][-1]["outcome"])'
+}
+
 usage() {
-  echo "usage: $0 <idempotency|duplicate-webhook|amount-mismatch|provider-outage|lost-webhook|settlement|reconciliation|four-eyes|security|audit-trail>" >&2
+  echo "usage: $0 <idempotency|duplicate-webhook|amount-mismatch|provider-outage|lost-webhook|settlement|reconciliation|four-eyes|security|audit-trail|outbound-key-crash|bank-reconciliation|fee-deduction|missing-credit|returned-payout|statement-reimport|slow-but-up|device-risk|chaos|merchant-webhooks>" >&2
 }
 
 require_tools
 case "${1:-}" in
-  idempotency | duplicate-webhook | amount-mismatch | provider-outage | lost-webhook | settlement | reconciliation | four-eyes | security | audit-trail)
+  idempotency | duplicate-webhook | amount-mismatch | provider-outage | lost-webhook | settlement | reconciliation | four-eyes | \
+    security | audit-trail | outbound-key-crash | bank-reconciliation | fee-deduction | missing-credit | returned-payout | \
+    statement-reimport | slow-but-up | device-risk | chaos | merchant-webhooks)
     onboard_merchant "merchant-$RUN_ID"
     "scenario_${1//-/_}"
     ;;

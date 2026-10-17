@@ -1,9 +1,12 @@
 package id.fatarc.portfolio.payflowreliability.settlement;
 
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -31,9 +34,12 @@ public class SettlementController {
         return settlementService.createBatch(merchantId, currency, caller);
     }
 
+    /** Newest first, a page at a time ({@code limit}, {@code after}). */
     @GetMapping("/batches")
-    public List<SettlementBatch> listBatches(@RequestParam(required = false) String merchantId) {
-        return settlementService.listBatches(merchantId);
+    public ResponseEntity<List<SettlementBatch>> listBatches(@RequestParam(required = false) String merchantId,
+                                                             @RequestParam(required = false) Integer limit,
+                                                             @RequestParam(required = false) String after) {
+        return PageResponses.of(settlementService.listBatches(merchantId, PageCursor.decode(after), limit));
     }
 
     @GetMapping("/batches/{batchId}/items")

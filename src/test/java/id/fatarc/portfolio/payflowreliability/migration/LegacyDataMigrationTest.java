@@ -1,6 +1,8 @@
 package id.fatarc.portfolio.payflowreliability.migration;
 
 import id.fatarc.portfolio.payflowreliability.audit.AuditHash;
+import id.fatarc.portfolio.payflowreliability.payment.PaymentIntent;
+import id.fatarc.portfolio.payflowreliability.refund.RefundRequest;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -162,7 +164,7 @@ class LegacyDataMigrationTest {
 
         var result = flyway("latest").migrate();
         assertThat(result.success).isTrue();
-        assertThat(result.targetSchemaVersion).isEqualTo(postgres ? "4" : "3");
+        assertThat(result.targetSchemaVersion).isEqualTo("13");
 
         assertThat(jdbc.queryForObject("select state from payment_intents where id = ?", String.class, refundRequested))
                 .as("REFUND_REQUESTED is no longer a payment state; the refund itself stays in flight").isEqualTo("SUCCESS");
@@ -187,11 +189,24 @@ class LegacyDataMigrationTest {
         assertThat(jdbc.queryForObject("select item_type || ':' || currency || ':' || cast(payment_intent_id as varchar(36))"
                 + " from settlement_batch_items", String.class)).isEqualTo("CAPTURE:IDR:" + settled);
         assertThat(jdbc.queryForObject("select capture_amount from settlement_batches", BigDecimal.class)).isEqualByComparingTo("100");
+        assertThat(jdbc.queryForObject("select payout_status from settlement_batches", String.class))
+                .as("paid out before bank statements were reconciled: no bank evidence to wait for").isEqualTo("LEGACY");
+        assertThat(jdbc.queryForObject("select started_at from payment_intents where id = ?", OffsetDateTime.class, settled))
+                .as("when it became PENDING, from the audit trail").isEqualTo(T0.plusMinutes(1));
         assertThat(jdbc.queryForObject("select status from merchants where merchant_id = ?", String.class, MERCHANT)).isEqualTo("ACTIVE");
 
         assertThat(jdbc.queryForList("select status from review_cases where reference_id = ? order by created_at",
                 String.class, held.toString())).as("the newer duplicate is closed so the unique index can be built")
                 .containsExactly("OPEN", "RESOLVED");
+        assertThat(jdbc.queryForList("select due_at from review_cases where reference_id = ? order by created_at",
+                OffsetDateTime.class, held.toString())).as("every legacy case gets the due time a new one would have")
+                .containsExactly(T0.plusHours(4), T0.plusSeconds(1).plusHours(4));
+
+        assertThat(jdbc.queryForObject("select request_fingerprint from payment_intents where id = ?", String.class, settled))
+                .as("a client retrying a pre-upgrade request is still recognized")
+                .isEqualTo(PaymentIntent.fingerprintOf("ORDER-" + settled, new BigDecimal("100.00"), "IDR"));
+        assertThat(jdbc.queryForObject("select request_fingerprint from refund_requests where id = ?", String.class, pendingRefund))
+                .isEqualTo(RefundRequest.fingerprintOf(refundRequested, new BigDecimal("50.00"), "customer"));
 
         assertAuditChainsVerify();
     }

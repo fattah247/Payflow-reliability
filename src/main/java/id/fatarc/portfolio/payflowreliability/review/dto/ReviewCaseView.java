@@ -14,6 +14,7 @@ import java.util.UUID;
  * A review case plus what an operator can do about it right now.
  *
  * @param paymentState   current state of the affected payment, when there is one
+ * @param dueAt          when a person should have acted (see {@link ReviewCase#DECIDE_WITHIN} and the others)
  * @param allowedActions decisions that {@code POST /api/review-cases/{id}/resolve} will accept; empty while a
  *                       proposal awaits approval and once resolved
  * @param approvalRequiredFor allowed actions that only take effect after a second operator approves
@@ -29,6 +30,8 @@ public record ReviewCaseView(
         String details,
         String createdBy,
         Instant createdAt,
+        Instant dueAt,
+        boolean overdue,
         Set<ReviewAction> allowedActions,
         Set<ReviewAction> approvalRequiredFor,
         ReviewAction proposedAction,
@@ -41,7 +44,8 @@ public record ReviewCaseView(
         ReviewAction resolutionAction,
         String resolutionNote
 ) {
-    public static ReviewCaseView from(ReviewCase reviewCase, PaymentState paymentState, Set<ReviewAction> allowedActions) {
+    public static ReviewCaseView from(ReviewCase reviewCase, PaymentState paymentState, Set<ReviewAction> allowedActions,
+                                      Instant now) {
         return new ReviewCaseView(
                 reviewCase.getId(),
                 reviewCase.getReason(),
@@ -53,6 +57,8 @@ public record ReviewCaseView(
                 reviewCase.getDetails(),
                 reviewCase.getCreatedBy(),
                 reviewCase.getCreatedAt(),
+                reviewCase.getDueAt(),
+                reviewCase.isOverdue(now),
                 allowedActions,
                 allowedActions.stream().filter(ReviewAction::requiresApproval)
                         .collect(java.util.stream.Collectors.toCollection(() -> java.util.EnumSet.noneOf(ReviewAction.class))),

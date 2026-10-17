@@ -1,6 +1,7 @@
 package id.fatarc.portfolio.payflowreliability.audit;
 
 import id.fatarc.portfolio.payflowreliability.common.RequestId;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,15 +15,20 @@ import java.util.UUID;
  * <p>Each event is appended to a hash chain (one chain per payment, otherwise per aggregate).
  * Writers of payment events hold that payment's row lock, so a chain never forks; the unique
  * (chain, sequence) constraint turns any unexpected race into a retryable 409 instead of a fork.
+ *
+ * <p>Every payment state change passes through {@link #recordStateChange}, which also publishes it
+ * ({@link PaymentStateChanged}) so the shop is told in the same transaction.
  */
 @Service
 public class AuditService {
     public static final String STATE_CHANGED = "TRANSACTION_STATE_CHANGED";
 
     private final AuditEventRepository auditEventRepository;
+    private final ApplicationEventPublisher events;
 
-    public AuditService(AuditEventRepository auditEventRepository) {
+    public AuditService(AuditEventRepository auditEventRepository, ApplicationEventPublisher events) {
         this.auditEventRepository = auditEventRepository;
+        this.events = events;
     }
 
     @Transactional
@@ -47,6 +53,7 @@ public class AuditService {
                                   String metadata) {
         append(new AuditEvent(AggregateType.PAYMENT_INTENT, paymentIntentId.toString(), paymentIntentId, STATE_CHANGED,
                 previousState.name(), newState.name(), actor, reason, metadata, RequestId.current()));
+        events.publishEvent(new PaymentStateChanged(paymentIntentId, previousState.name(), newState.name()));
     }
 
     @Transactional(readOnly = true)

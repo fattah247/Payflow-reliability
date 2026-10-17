@@ -52,6 +52,81 @@ groups:
           summary: "More than 20% of provider calls end without a definite answer"
           runbook: docs/runbook.md#provider-calls-failing
 
+  - name: payflow-settlement-certainty
+    rules:
+      - alert: PayflowReconciliationBreaksOverdue
+        expr: payflow_reconciliation_breaks_overdue > 0
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} reconciliation break(s) between ledger, provider and bank are past their due time"
+          runbook: docs/runbook.md#reconciliation-breaks-overdue
+
+      - alert: PayflowReconciliationNotRunning
+        expr: payflow_reconciliation_check_age_seconds > 1800
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The three-way reconciliation has not run for over 30 minutes"
+          runbook: docs/runbook.md#reconciliation-not-running
+
+      - alert: PayflowBankStatementsNotArriving
+        expr: payflow_bank_statement_import_age_seconds > 129600
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "No bank statement imported for 36 hours: payouts cannot be confirmed or declared missing"
+          runbook: docs/runbook.md#bank-statements-not-arriving
+
+  - name: payflow-checkout
+    rules:
+      # Every probe says UP, and money is still being lost: confirmations stuck past the SLO, or customers leaving.
+      - alert: PayflowSlowButUp
+        expr: |
+          max(payflow_health_up) == 1
+          and on() (
+            sum(payflow_money_at_risk_count{kind="pending_beyond_sla"}) >= 3
+            or sum(increase(payflow_checkout_abandoned_total[10m])) >= 3
+          )
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Healthy by every probe, but money is at risk: payments stuck past the confirmation SLO or customers abandoning checkout"
+          runbook: docs/runbook.md#slow-but-up
+
+      # Error-budget burn: the share of confirmations slower than the SLO, divided by the budget (1 - objective).
+      # 14.4 over one hour spends 2 % of a 30-day budget; 6 over six hours spends 5 % (the usual pair of windows).
+      - alert: PayflowCheckoutSloBurn
+        expr: |
+          (
+            sum(rate(payflow_payment_confirmations_total{within_slo="false"}[1h]))
+              / clamp_min(sum(rate(payflow_payment_confirmations_total[1h])), 1e-9)
+          ) / (1 - max(payflow_checkout_slo_objective)) > 14.4
+          or
+          (
+            sum(rate(payflow_payment_confirmations_total{within_slo="false"}[6h]))
+              / clamp_min(sum(rate(payflow_payment_confirmations_total[6h])), 1e-9)
+          ) / (1 - max(payflow_checkout_slo_objective)) > 6
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Checkout confirmations are burning the latency error budget too fast"
+          runbook: docs/runbook.md#checkout-slo-burn
+
+      - alert: PayflowDuplicateCharge
+        expr: sum(payflow_money_at_risk_count{kind="duplicate_charges"}) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} checkout(s) charged more than once: a client is not reusing its idempotency key"
+          runbook: docs/runbook.md#duplicate-charge
+
   - name: payflow-flow
     rules:
       - alert: PayflowPaymentsStuck
@@ -120,3 +195,26 @@ groups:
         annotations:
           summary: "Operational gauges have not refreshed for 5 minutes (database or scheduler problem)"
           runbook: docs/runbook.md#metrics-stale
+
+  # Shops' notifications (ADR 030). A shop that is not told acts on stale state: ships an unpaid order, or never ships a
+  # paid one. One shop's endpoint being down is the shop's problem and only delays its own events; these alerts are
+  # tickets so someone tells the shop and redelivers, not pages.
+  - name: payflow-merchants
+    rules:
+      - alert: PayflowMerchantWebhooksFailing
+        expr: payflow_merchant_events_failed > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} merchant event(s) were given up on after every delivery attempt"
+          runbook: docs/runbook.md#merchant-webhooks-failing
+
+      - alert: PayflowMerchantNotificationsDelayed
+        expr: payflow_merchant_events_oldest_pending_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A merchant event has waited over an hour to be delivered"
+          runbook: docs/runbook.md#merchant-notifications-delayed

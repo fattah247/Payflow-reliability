@@ -1,5 +1,8 @@
 package id.fatarc.portfolio.payflowreliability.review;
 
+import id.fatarc.portfolio.payflowreliability.common.Keyset;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,7 +49,7 @@ public class ReviewService {
                         ReviewStatus.UNRESOLVED, reason, referenceType, referenceId)
                 .orElseGet(() -> {
                     ReviewCase created = reviewCaseRepository.saveAndFlush(
-                            new ReviewCase(reason, referenceType, referenceId, paymentIntentId, details, actor));
+                            new ReviewCase(reason, referenceType, referenceId, paymentIntentId, details, actor, clock.instant()));
                     meterRegistry.counter("payflow.review.cases.opened", "reason", reason.name()).increment();
                     log.info("Review case opened id={} reason={} reference={}:{} paymentIntentId={}",
                             created.getId(), reason, referenceType, referenceId, paymentIntentId);
@@ -64,6 +67,18 @@ public class ReviewService {
     /** Oldest first: the queue is worked in arrival order. Null filters are ignored. */
     @Transactional(readOnly = true)
     public List<ReviewCase> findCases(Collection<ReviewStatus> statuses, ReviewReason reason, UUID paymentIntentId) {
+        return reviewCaseRepository.findAll(filter(statuses, reason, paymentIntentId), Sort.by("createdAt", "id"));
+    }
+
+    /** One page of {@link #findCases}, oldest first, starting after {@code after}. */
+    @Transactional(readOnly = true)
+    public PageSlice<ReviewCase> pageCases(Collection<ReviewStatus> statuses, ReviewReason reason, UUID paymentIntentId,
+                                           PageCursor after, Integer limit) {
+        return Keyset.page(reviewCaseRepository, filter(statuses, reason, paymentIntentId), "createdAt", true, after, limit,
+                reviewCase -> new PageCursor(reviewCase.getCreatedAt(), reviewCase.getId()));
+    }
+
+    private static Specification<ReviewCase> filter(Collection<ReviewStatus> statuses, ReviewReason reason, UUID paymentIntentId) {
         Specification<ReviewCase> filter = (root, query, cb) -> cb.conjunction();
         if (statuses != null) {
             filter = filter.and((root, query, cb) -> root.get("status").in(statuses));
@@ -74,7 +89,7 @@ public class ReviewService {
         if (paymentIntentId != null) {
             filter = filter.and((root, query, cb) -> cb.equal(root.get("paymentIntentId"), paymentIntentId));
         }
-        return reviewCaseRepository.findAll(filter, Sort.by("createdAt", "id"));
+        return filter;
     }
 
     /** An unresolved case of this reason about this payment, if any. */

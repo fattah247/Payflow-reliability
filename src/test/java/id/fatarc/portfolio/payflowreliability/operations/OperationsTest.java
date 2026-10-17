@@ -22,6 +22,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /** Operator views and the gauges alerting reads. */
 class OperationsTest extends IntegrationTest {
     @Autowired
+    private id.fatarc.portfolio.payflowreliability.ledger.LedgerService ledgerService;
+
+    @Autowired
     private OperationalMetrics operationalMetrics;
     @Autowired
     private MeterRegistry meterRegistry;
@@ -124,5 +127,30 @@ class OperationsTest extends IntegrationTest {
         assertThat(gauge("payflow.ledger.invariant.violations")).isZero();
         assertThat(gauge("payflow.ledger.invariant.check.age")).isLessThan(5);
         assertThat(gauge("payflow.metrics.snapshot.age")).isLessThan(5);
+    }
+
+    @Test
+    void shouldCheckEveryMoneyRuleOnDemandWithTheEvidence() throws Exception {
+        paidIntent("ORDER-OPS-INV", "3000");
+        settle(MERCHANT_A);
+        landPayouts();
+
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/operations/invariants")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.allHold").value(true))
+                .andExpect(jsonPath("$.rules[*].name", hasItems("BOOKS_BALANCE", "CAPTURE_PAID_OUT_AT_MOST_ONCE",
+                        "RECONCILED_ONLY_WITH_A_BANK_LINE", "UNMATCHED_MONEY_HAS_A_BREAK", "BANK_ENTRY_BOOKED_ONCE",
+                        "LANDING_IS_PROVEN", "BLOCKED_NEVER_REACHES_THE_PROVIDER", "STEP_UP_CONFIRMED_BEFORE_CAPTURE",
+                        "NO_RETRY_CHARGES_TWICE", "REFUNDED_ONCE", "PAYOUT_SENT_ONCE")))
+                .andExpect(jsonPath("$.rules[0].violations", empty()));
+
+        // Money that no bank line explains, booked around the import: the books no longer agree with the bank.
+        new org.springframework.transaction.support.TransactionTemplate(transactionManager).executeWithoutResult(status ->
+                ledgerService.bankUnmatched(java.util.UUID.randomUUID(), "IDR", new BigDecimal("100")));
+
+        mockMvc.perform(as(OPS_ANA_KEY, get("/api/operations/invariants")))
+                .andExpect(jsonPath("$.allHold").value(false))
+                .andExpect(jsonPath("$.rules[0].holds").value(false))
+                .andExpect(jsonPath("$.rules[0].violations[0]", containsString("BANK_CASH_MISMATCH")));
     }
 }

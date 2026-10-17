@@ -1,6 +1,6 @@
 # 005 Settlement Reconciliation
 
-Status: amended by [017](017-net-settlement.md) (net payouts) and by two-sided reconciliation (payouts missing from a report are flagged).
+Status: amended by [017](017-net-settlement.md) (net payouts), by two-sided reconciliation (payouts missing from a report are flagged), and by [025](025-bank-statement-three-way-reconciliation.md) (the bank statement as the third leg: a payment is reconciled only when its payout has landed).
 
 ## Context
 

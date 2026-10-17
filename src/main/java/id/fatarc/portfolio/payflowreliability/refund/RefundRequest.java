@@ -3,10 +3,13 @@ package id.fatarc.portfolio.payflowreliability.refund;
 import id.fatarc.portfolio.payflowreliability.common.InvalidStateTransitionException;
 import id.fatarc.portfolio.payflowreliability.common.Money;
 import id.fatarc.portfolio.payflowreliability.common.Text;
+import id.fatarc.portfolio.payflowreliability.idempotency.RequestFingerprint;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 @Entity
@@ -36,6 +39,10 @@ public class RefundRequest {
 
     /** The requester's Idempotency-Key, unique per payment. */
     private String idempotencyKey;
+
+    /** Canonical hash of the creating request; a retry under the same key must match it. */
+    @Column(nullable = false, length = 64)
+    private String requestFingerprint;
 
     @Column(nullable = false)
     private String requestedBy;
@@ -68,6 +75,7 @@ public class RefundRequest {
         this.reason = reason;
         this.status = initialStatus;
         this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = fingerprintOf(paymentIntentId, amount, reason);
         this.requestedBy = requestedBy;
         this.createdAt = Instant.now();
         this.updatedAt = this.createdAt;
@@ -100,9 +108,18 @@ public class RefundRequest {
         this.failureReason = Text.fit(failureReason, 500);
     }
 
+    /** The fingerprint of a refund request: which payment, how much, and why. */
+    public static String fingerprintOf(UUID paymentIntentId, BigDecimal amount, String reason) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("paymentIntentId", paymentIntentId);
+        fields.put("amount", amount);
+        fields.put("reason", reason);
+        return RequestFingerprint.of("refunds.create", fields);
+    }
+
     /** Same request again (a client retry with the same Idempotency-Key). */
-    public boolean matches(BigDecimal requestedAmount, String requestedReason) {
-        return amount.compareTo(requestedAmount) == 0 && reason.equals(requestedReason);
+    public boolean matchesFingerprint(String fingerprint) {
+        return requestFingerprint.equals(fingerprint);
     }
 
     private void transition(RefundStatus from, RefundStatus to, String message) {
@@ -120,6 +137,7 @@ public class RefundRequest {
     public String getReason() { return reason; }
     public RefundStatus getStatus() { return status; }
     public String getIdempotencyKey() { return idempotencyKey; }
+    public String getRequestFingerprint() { return requestFingerprint; }
     public String getRequestedBy() { return requestedBy; }
     public String getProviderRefundId() { return providerRefundId; }
     public String getFailureReason() { return failureReason; }

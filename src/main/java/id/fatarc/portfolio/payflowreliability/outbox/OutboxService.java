@@ -3,10 +3,14 @@ package id.fatarc.portfolio.payflowreliability.outbox;
 import id.fatarc.portfolio.payflowreliability.audit.AuditService;
 import id.fatarc.portfolio.payflowreliability.common.BusinessException;
 import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
+import id.fatarc.portfolio.payflowreliability.common.Keyset;
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageSlice;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentIntentRepository;
 import id.fatarc.portfolio.payflowreliability.payment.PaymentState;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
-import org.springframework.data.domain.PageRequest;
+import id.fatarc.portfolio.payflowreliability.settlement.SettlementBatchRepository;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,13 +27,15 @@ public class OutboxService {
 
     private final OutboxCommandRepository repository;
     private final PaymentIntentRepository paymentIntentRepository;
+    private final SettlementBatchRepository settlementBatchRepository;
     private final AuditService auditService;
     private final Clock clock;
 
     public OutboxService(OutboxCommandRepository repository, PaymentIntentRepository paymentIntentRepository,
-                         AuditService auditService, Clock clock) {
+                         SettlementBatchRepository settlementBatchRepository, AuditService auditService, Clock clock) {
         this.repository = repository;
         this.paymentIntentRepository = paymentIntentRepository;
+        this.settlementBatchRepository = settlementBatchRepository;
         this.auditService = auditService;
         this.clock = clock;
     }
@@ -37,6 +43,12 @@ public class OutboxService {
     @Transactional(propagation = Propagation.MANDATORY)
     public OutboxCommand enqueueRefund(UUID paymentIntentId, UUID refundId) {
         return repository.save(OutboxCommand.refund(paymentIntentId, refundId, clock.instant()));
+    }
+
+    /** Queued in the transaction that creates the settlement batch, so a batch never exists without its payout. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public OutboxCommand enqueuePayout(UUID settlementBatchId) {
+        return repository.save(OutboxCommand.payout(settlementBatchId, clock.instant()));
     }
 
     /**
@@ -66,8 +78,13 @@ public class OutboxService {
     @Transactional
     public OutboxCommand retry(UUID commandId, Caller caller) {
         // Payment first (the global lock order; a no-op when the caller already holds it), then read the command.
-        UUID paymentIntentId = repository.findPaymentIntentIdById(commandId).orElseThrow(() -> notFound(commandId));
-        paymentIntentRepository.findForUpdate(paymentIntentId);
+        // A payout has no payment: its settlement batch is locked instead.
+        OutboxCommandRepository.Subject subject = repository.findSubjectById(commandId).orElseThrow(() -> notFound(commandId));
+        if (subject.getCommandType() == CommandType.PAYOUT) {
+            settlementBatchRepository.findForUpdate(subject.getSettlementBatchId());
+        } else {
+            paymentIntentRepository.findForUpdate(subject.getPaymentIntentId());
+        }
         OutboxCommand command = getRequired(commandId);
         if (command.getStatus() == CommandStatus.NEEDS_REVIEW) {
             command.requeue(clock.instant());
@@ -104,15 +121,20 @@ public class OutboxService {
     }
 
     @Transactional(readOnly = true)
-    public List<OutboxCommand> list(CommandStatus status) {
-        return status == null
-                ? repository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, 200))
-                : repository.findByStatusOrderByCreatedAtAsc(status);
+    public PageSlice<OutboxCommand> list(CommandStatus status, PageCursor after, Integer limit) {
+        Specification<OutboxCommand> filter = status == null ? Keyset.all() : (root, query, cb) -> cb.equal(root.get("status"), status);
+        return Keyset.page(repository, filter, "createdAt", status != null, after, limit,
+                command -> new PageCursor(command.getCreatedAt(), command.getId()));
     }
 
     @Transactional(readOnly = true)
     public List<OutboxCommand> forPayment(UUID paymentIntentId) {
         return repository.findByPaymentIntentIdOrderByCreatedAtAsc(paymentIntentId);
+    }
+
+    @Transactional(readOnly = true)
+    public List<OutboxCommand> forBatch(UUID settlementBatchId) {
+        return repository.findBySettlementBatchIdOrderByCreatedAtAsc(settlementBatchId);
     }
 
     private static BusinessException notFound(UUID commandId) {

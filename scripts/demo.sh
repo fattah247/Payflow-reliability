@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Quick end-to-end flow against a running app: onboard a merchant, take a payment through the provider
-# simulator, refund part of it, pay the merchant out, reconcile, and show the books.
+# simulator, refund part of it, pay the merchant out, reconcile against the provider's report and the bank
+# statement, and show the books.
 # Every run uses fresh ids, so it can be repeated without resetting the database.
 set -euo pipefail
 
@@ -29,13 +30,20 @@ refund=$(pick id)
 wait_for_refund "$refund" COMPLETED
 echo "partial refund executed by the provider: $(pick status) $(pick amount)"
 
-as_ops request POST "/api/settlements/batches?merchantId=$MERCHANT_ID" ""
-echo "settlement batch: captures $(pick captureAmount) - refunds $(pick deductionAmount) = net $(pick totalAmount)"
+batch=$(settle_now)
+batch_view "$batch"
+echo "settlement batch: net $(pick ledger.batchTotal) paid out; provider fee $(pick provider.fee), $(pick provider.net) on its way to the bank"
 
 tx=$(provider_tx "$payment")
 as_ops request POST /api/reconciliation/reports "{\"rows\": [{\"providerTransactionId\": \"$tx\", \"amount\": 125000,
   \"currency\": \"IDR\", \"providerStatus\": \"SUCCESS\", \"settlementDate\": \"$(date +%F)\", \"refundedAmount\": 25000}]}"
-echo "reconciliation: $(pick rows.0.outcome)"
+echo "provider report: $(pick rows.0.outcome)"
+
+batch_view "$batch"
+bank_catch_up "$(pick provider.expectedValueDate)"
+batch_view "$batch"
+echo "bank statement: payout $(pick payoutStatus), $(pick bank.0.received) credited"
+echo "payment: $(states "$payment") (ledger, provider and bank agree)"
 
 echo "still owed to the merchant: $(owed "$MERCHANT_ID") IDR"
 as_ops request GET "/api/audit-events/verify?paymentIntentId=$payment" ""

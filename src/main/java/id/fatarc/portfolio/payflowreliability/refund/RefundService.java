@@ -17,6 +17,7 @@ import id.fatarc.portfolio.payflowreliability.refund.dto.CreateRefundRequest;
 import id.fatarc.portfolio.payflowreliability.review.ReviewReason;
 import id.fatarc.portfolio.payflowreliability.review.ReviewService;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,7 +39,8 @@ import java.util.UUID;
  *       the ledger journal is posted with the confirmation.</li>
  *   <li>A refund can be cancelled until it is sent to the provider.</li>
  * </ul>
- * Every mutation locks the payment first, so refunds of one payment are serialized.
+ * Every mutation locks the payment first, so refunds of one payment are serialized. Every new refund and status
+ * change is published ({@link RefundChanged}) inside that transaction, so the shop is told.
  */
 @Service
 public class RefundService {
@@ -48,6 +50,7 @@ public class RefundService {
     private final LedgerService ledgerService;
     private final ReviewService reviewService;
     private final AuditService auditService;
+    private final ApplicationEventPublisher events;
     private final Clock clock;
 
     public RefundService(PaymentIntentService paymentIntentService,
@@ -56,6 +59,7 @@ public class RefundService {
                          LedgerService ledgerService,
                          ReviewService reviewService,
                          AuditService auditService,
+                         ApplicationEventPublisher events,
                          Clock clock) {
         this.paymentIntentService = paymentIntentService;
         this.refundRequestRepository = refundRequestRepository;
@@ -63,6 +67,7 @@ public class RefundService {
         this.ledgerService = ledgerService;
         this.reviewService = reviewService;
         this.auditService = auditService;
+        this.events = events;
         this.clock = clock;
     }
 
@@ -75,7 +80,7 @@ public class RefundService {
         var existing = refundRequestRepository.findByPaymentIntentIdAndIdempotencyKey(paymentIntentId, idempotencyKey);
         if (existing.isPresent()) {
             RefundRequest refund = existing.get();
-            if (!refund.matches(request.amount(), request.reason())) {
+            if (!refund.matchesFingerprint(RefundRequest.fingerprintOf(paymentIntentId, request.amount(), request.reason()))) {
                 throw new BusinessException(ErrorCode.IDEMPOTENCY_KEY_REUSED,
                         "Idempotency key " + idempotencyKey + " was already used for refund " + refund.getId()
                                 + " with a different amount or reason.");
@@ -114,6 +119,7 @@ public class RefundService {
             auditService.record(AggregateType.REFUND_REQUEST, refund.getId().toString(), paymentIntentId,
                     "REFUND_REVIEW_REQUIRED", caller.name(), "Refund requires manual review after reconciliation.",
                     "refundId=" + refund.getId() + ",amount=" + plain(refund.getAmount()));
+            events.publishEvent(new RefundChanged(refund.getId(), true));
             return new RefundSubmission(refund, false);
         }
 
@@ -123,6 +129,7 @@ public class RefundService {
         auditService.record(AggregateType.REFUND_REQUEST, refund.getId().toString(), paymentIntentId,
                 "REFUND_REQUESTED", caller.name(), request.reason(),
                 "refundId=" + refund.getId() + ",amount=" + plain(refund.getAmount()));
+        events.publishEvent(new RefundChanged(refund.getId(), true));
         return new RefundSubmission(refund, false);
     }
 
@@ -153,6 +160,7 @@ public class RefundService {
         }
         auditService.record(AggregateType.REFUND_REQUEST, refundId.toString(), intent.getId(), "REFUND_CANCELLED",
                 caller.name(), "Refund cancelled before reaching the provider.", "refundId=" + refundId);
+        events.publishEvent(new RefundChanged(refundId, false));
         return refund;
     }
 
@@ -178,6 +186,7 @@ public class RefundService {
         outboxService.enqueueRefund(intent.getId(), refund.getId());
         auditService.record(AggregateType.REFUND_REQUEST, refundId.toString(), intent.getId(), "REFUND_APPROVED", actor,
                 "Refund approved in manual review: " + note, "refundId=" + refundId);
+        events.publishEvent(new RefundChanged(refundId, false));
         return refund;
     }
 
@@ -188,6 +197,7 @@ public class RefundService {
         refund.reject();
         auditService.record(AggregateType.REFUND_REQUEST, refundId.toString(), intent.getId(), "REFUND_REJECTED", actor,
                 "Refund rejected in manual review: " + note, "refundId=" + refundId);
+        events.publishEvent(new RefundChanged(refundId, false));
         return refund;
     }
 
@@ -204,6 +214,7 @@ public class RefundService {
         auditService.record(AggregateType.REFUND_REQUEST, refund.getId().toString(), intent.getId(), "REFUND_COMPLETED",
                 actor, "Provider confirmed the refund.",
                 "refundId=" + refund.getId() + ",providerRefundId=" + providerRefundId + ",amount=" + plain(refund.getAmount()));
+        events.publishEvent(new RefundChanged(refund.getId(), false));
     }
 
     /** The payment was reversed before this refund was sent: the reversal returns what is left. Caller holds the payment lock. */
@@ -212,6 +223,7 @@ public class RefundService {
         refund.fail("The payment was reversed before this refund was sent; the reversal returns the unrefunded amount.");
         auditService.record(AggregateType.REFUND_REQUEST, refund.getId().toString(), intent.getId(), "REFUND_FAILED",
                 actor, "Refund not sent: the payment was reversed.", "refundId=" + refund.getId());
+        events.publishEvent(new RefundChanged(refund.getId(), false));
     }
 
     /** The provider refused the refund. Caller holds the payment lock. */
@@ -222,6 +234,7 @@ public class RefundService {
                 refund.getId().toString(), intent.getId(), "Provider refused refund " + refund.getId() + ": " + reason, actor);
         auditService.record(AggregateType.REFUND_REQUEST, refund.getId().toString(), intent.getId(), "REFUND_FAILED",
                 actor, "Provider refused the refund: " + reason, "refundId=" + refund.getId());
+        events.publishEvent(new RefundChanged(refund.getId(), false));
     }
 
     @Transactional(readOnly = true)

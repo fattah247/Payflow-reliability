@@ -25,8 +25,9 @@ class PaymentIntentIdempotencyTest extends IntegrationTest {
         assertThat(second.replayed()).isTrue();
         assertThat(second.intent().getId()).isEqualTo(first.intent().getId());
         assertThat(paymentIntentRepository.count()).isEqualTo(1);
+        // The replay is answered with the first attempt's risk decision; nothing is decided twice.
         assertThat(auditFor(first.intent())).extracting("eventType")
-                .containsExactly("PAYMENT_INTENT_CREATED", "IDEMPOTENCY_REPLAYED");
+                .containsExactly("PAYMENT_INTENT_CREATED", "RISK_DECISION", "IDEMPOTENCY_REPLAYED");
     }
 
     @Test

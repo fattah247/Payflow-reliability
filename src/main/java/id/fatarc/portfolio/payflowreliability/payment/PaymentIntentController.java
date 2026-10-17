@@ -1,5 +1,9 @@
 package id.fatarc.portfolio.payflowreliability.payment;
 
+import id.fatarc.portfolio.payflowreliability.common.PageCursor;
+import id.fatarc.portfolio.payflowreliability.common.PageResponses;
+import id.fatarc.portfolio.payflowreliability.payment.dto.CancelPaymentIntentRequest;
+import id.fatarc.portfolio.payflowreliability.payment.dto.ConfirmStepUpRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.CreatePaymentIntentRequest;
 import id.fatarc.portfolio.payflowreliability.payment.dto.PaymentIntentResponse;
 import id.fatarc.portfolio.payflowreliability.security.Caller;
@@ -8,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -39,6 +44,30 @@ public class PaymentIntentController {
     @PostMapping("/{paymentIntentId}/start")
     public PaymentIntentResponse start(@PathVariable UUID paymentIntentId, Caller caller) {
         return PaymentIntentResponse.from(paymentIntentService.start(paymentIntentId, caller));
+    }
+
+    /** The customer confirmed a device-risk step-up with the method the decision required. Repeating it is a no-op. */
+    @PostMapping("/{paymentIntentId}/confirm")
+    public PaymentIntentResponse confirm(@PathVariable UUID paymentIntentId, @Valid @RequestBody ConfirmStepUpRequest request,
+                                         Caller caller) {
+        return PaymentIntentResponse.from(paymentIntentService.confirm(paymentIntentId, request.method(), caller));
+    }
+
+    /** Withdraws a payment the customer has not paid, for example an abandoned checkout. Repeating it is a no-op. */
+    @PostMapping("/{paymentIntentId}/cancel")
+    public PaymentIntentResponse cancel(@PathVariable UUID paymentIntentId, @Valid @RequestBody CancelPaymentIntentRequest request,
+                                        Caller caller) {
+        return PaymentIntentResponse.from(paymentIntentService.cancel(paymentIntentId, request.reason(), caller));
+    }
+
+    /** The caller's payments for one merchant reference, newest first, a page at a time. Operators also pass merchantId. */
+    @GetMapping
+    public ResponseEntity<List<PaymentIntentResponse>> findByReference(@RequestParam String merchantReference,
+                                                                       @RequestParam(required = false) String merchantId,
+                                                                       @RequestParam(required = false) Integer limit,
+                                                                       @RequestParam(required = false) String after, Caller caller) {
+        return PageResponses.of(paymentIntentService.findByReference(merchantReference, merchantId, caller, PageCursor.decode(after), limit)
+                .map(rows -> rows.stream().map(PaymentIntentResponse::from).toList()));
     }
 
     @GetMapping("/{paymentIntentId}")
