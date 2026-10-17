@@ -176,7 +176,7 @@ public class ReviewWorkflowService {
             PaymentState paymentState = intent == null ? null : intent.getState();
             Set<ReviewAction> allowed = reviewCase.getStatus() == ReviewStatus.OPEN
                     ? allowedActions(related) : EnumSet.noneOf(ReviewAction.class);
-            return ReviewCaseView.from(reviewCase, paymentState, allowed);
+            return ReviewCaseView.from(reviewCase, paymentState, allowed, clock.instant());
         }).toList();
     }
 

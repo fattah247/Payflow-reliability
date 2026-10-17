@@ -5,6 +5,7 @@ import id.fatarc.portfolio.payflowreliability.common.ErrorCode;
 import id.fatarc.portfolio.payflowreliability.common.Text;
 import jakarta.persistence.*;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -66,11 +67,23 @@ public class ReviewCase {
     @Column(nullable = false)
     private Instant createdAt;
 
+    /**
+     * When a person should have acted, matching the alert that fires if nobody does: a decision within 4 hours
+     * (PayflowReviewQueueAging), an unknown provider outcome within 5 minutes (PayflowProviderCallOutcomeUnknown), a
+     * proposal's approval within 1 hour of the proposal (PayflowApprovalWaiting).
+     */
+    @Column(nullable = false)
+    private Instant dueAt;
+
+    public static final Duration DECIDE_WITHIN = Duration.ofHours(4);
+    public static final Duration UNKNOWN_OUTCOME_WITHIN = Duration.ofMinutes(5);
+    public static final Duration APPROVE_WITHIN = Duration.ofHours(1);
+
     protected ReviewCase() {
     }
 
     public ReviewCase(ReviewReason reason, String referenceType, String referenceId, UUID paymentIntentId,
-                      String details, String createdBy) {
+                      String details, String createdBy, Instant now) {
         this.id = UUID.randomUUID();
         this.reason = reason;
         this.status = ReviewStatus.OPEN;
@@ -79,7 +92,13 @@ public class ReviewCase {
         this.paymentIntentId = paymentIntentId;
         this.details = Text.fit(details, 1000);
         this.createdBy = createdBy;
-        this.createdAt = Instant.now();
+        this.createdAt = now;
+        this.dueAt = decisionDue();
+    }
+
+    /** When the decision itself is due: from the case's creation, whatever happened to proposals since. */
+    private Instant decisionDue() {
+        return createdAt.plus(reason == ReviewReason.PROVIDER_OUTCOME_UNKNOWN ? UNKNOWN_OUTCOME_WITHIN : DECIDE_WITHIN);
     }
 
     /** First half of a two-person decision: nothing happens until a different operator approves. */
@@ -90,6 +109,7 @@ public class ReviewCase {
         this.proposedBy = proposedBy;
         this.proposedAt = now;
         this.proposalNote = Text.fit(note, 1000);
+        this.dueAt = now.plus(APPROVE_WITHIN);
     }
 
     public void withdrawProposal() {
@@ -99,6 +119,7 @@ public class ReviewCase {
         this.proposedBy = null;
         this.proposedAt = null;
         this.proposalNote = null;
+        this.dueAt = decisionDue();
     }
 
     public void resolve(String resolvedBy, String resolutionNote, ReviewAction action, String approvedBy, Instant now) {
@@ -112,6 +133,10 @@ public class ReviewCase {
         this.resolutionAction = action;
         this.approvedBy = approvedBy;
         this.resolvedAt = now;
+    }
+
+    public boolean isOverdue(Instant now) {
+        return isUnresolved() && now.isAfter(dueAt);
     }
 
     public boolean isUnresolved() {
@@ -144,4 +169,5 @@ public class ReviewCase {
     public String getResolutionNote() { return resolutionNote; }
     public ReviewAction getResolutionAction() { return resolutionAction; }
     public Instant getCreatedAt() { return createdAt; }
+    public Instant getDueAt() { return dueAt; }
 }

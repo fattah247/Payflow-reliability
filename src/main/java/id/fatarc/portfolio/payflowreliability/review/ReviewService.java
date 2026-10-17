@@ -46,7 +46,7 @@ public class ReviewService {
                         ReviewStatus.UNRESOLVED, reason, referenceType, referenceId)
                 .orElseGet(() -> {
                     ReviewCase created = reviewCaseRepository.saveAndFlush(
-                            new ReviewCase(reason, referenceType, referenceId, paymentIntentId, details, actor));
+                            new ReviewCase(reason, referenceType, referenceId, paymentIntentId, details, actor, clock.instant()));
                     meterRegistry.counter("payflow.review.cases.opened", "reason", reason.name()).increment();
                     log.info("Review case opened id={} reason={} reference={}:{} paymentIntentId={}",
                             created.getId(), reason, referenceType, referenceId, paymentIntentId);

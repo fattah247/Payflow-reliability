@@ -31,7 +31,7 @@ class CaseFileAttentionTest {
 
     private static ReviewCaseView openCase(PaymentIntent intent, ReviewReason reason) {
         return new ReviewCaseView(UUID.randomUUID(), reason, ReviewStatus.OPEN, "PROVIDER_TRANSACTION", "tx-1",
-                intent.getId(), intent.getState(), "details", "operator:ops-ana", Instant.now(),
+                intent.getId(), intent.getState(), "details", "operator:ops-ana", Instant.now(), Instant.now().plusSeconds(14400), false,
                 Set.of(ReviewAction.ACKNOWLEDGE), Set.of(), null, null, null, null, null, null, null, null, null);
     }
 

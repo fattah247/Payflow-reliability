@@ -164,7 +164,7 @@ class LegacyDataMigrationTest {
 
         var result = flyway("latest").migrate();
         assertThat(result.success).isTrue();
-        assertThat(result.targetSchemaVersion).isEqualTo("11");
+        assertThat(result.targetSchemaVersion).isEqualTo("12");
 
         assertThat(jdbc.queryForObject("select state from payment_intents where id = ?", String.class, refundRequested))
                 .as("REFUND_REQUESTED is no longer a payment state; the refund itself stays in flight").isEqualTo("SUCCESS");
@@ -198,6 +198,9 @@ class LegacyDataMigrationTest {
         assertThat(jdbc.queryForList("select status from review_cases where reference_id = ? order by created_at",
                 String.class, held.toString())).as("the newer duplicate is closed so the unique index can be built")
                 .containsExactly("OPEN", "RESOLVED");
+        assertThat(jdbc.queryForList("select due_at from review_cases where reference_id = ? order by created_at",
+                OffsetDateTime.class, held.toString())).as("every legacy case gets the due time a new one would have")
+                .containsExactly(T0.plusHours(4), T0.plusSeconds(1).plusHours(4));
 
         assertThat(jdbc.queryForObject("select request_fingerprint from payment_intents where id = ?", String.class, settled))
                 .as("a client retrying a pre-upgrade request is still recognized")
