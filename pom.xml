@@ -17,6 +17,14 @@
     <name>Payflow Reliability</name>
     <description>Local-first payment reliability backend: idempotency, signed webhooks, outbox, double-entry ledger, settlement, reconciliation, review</description>
 
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
     <properties>
         <java.version>21</java.version>
         <jqwik.version>1.9.3</jqwik.version>
