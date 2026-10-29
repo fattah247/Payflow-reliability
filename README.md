@@ -860,3 +860,10 @@ The full list for the settlement and risk work is in [Settlement certainty: hone
 10. `OutboxTest`, `ThreeWayReconciliationTest`, `DeviceRiskFlowTest`, `LegacyDataMigrationTest`
 
 The core idea: a small backend that stays correct when the world around it misbehaves, and can prove it.
+
+---
+
+## License
+
+[MIT](LICENSE): use, change and share the code freely, keeping the copyright notice. It comes with no warranty;
+see the disclaimer at the top for what this project is and is not.
